@@ -1156,6 +1156,7 @@ static void vdp_advance_dma(vdp_context * context)
 	if (!dma_len) {
 		context->flags &= ~FLAG_DMA_RUN;
 		context->cd &= 0xF;
+		context->dma_log_active = 0;
 	}
 }
 

@@ -3696,6 +3696,84 @@ static uint8_t cmd_vdp_reg_break(debug_root *root, parsed_command *cmd)
 	return 1;
 }
 
+static void on_dma_transfer(vdp_context *context)
+{
+	FILE *logfile = context->dma_log_file ? context->dma_log_file : stderr;
+	//For fills, the hook fires every FIFO drain. Only log once per DMA operation.
+	if (context->dma_log_active) {
+		return;
+	}
+	context->dma_log_active = 1;
+	uint8_t dma_type_bits = context->regs[REG_DMASRC_H] & 0xC0;
+	const char *type;
+	uint32_t src = 0;
+	if (dma_type_bits == 0xC0) {
+		type = "COPY";
+		src = (context->regs[REG_DMASRC_M] << 8) | context->regs[REG_DMASRC_L];
+	} else if (dma_type_bits == 0x80) {
+		type = "FILL";
+	} else {
+		type = "68K";
+		src = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
+		    | ((uint32_t)context->regs[REG_DMASRC_M] << 9)
+		    | ((uint32_t)context->regs[REG_DMASRC_L] << 1);
+	}
+	uint16_t len = (context->regs[REG_DMALEN_H] << 8) | context->regs[REG_DMALEN_L];
+	uint32_t dst_addr = context->address;
+	const char *dst_type;
+	switch (context->cd & 0xF) {
+	case 1:  dst_type = "VRAM";  break;
+	case 3:  dst_type = "CRAM";  break;
+	case 5:  dst_type = "VSRAM"; break;
+	default: dst_type = "???";   break;
+	}
+	fprintf(logfile, "%u\t%u\t%u\t%s\t0x%06X\t%s\t0x%04X\t%u\n",
+		context->frame, context->vcounter, context->hslot,
+		type, src, dst_type, dst_addr, len);
+	fflush(logfile);
+}
+
+static uint8_t cmd_dma_trace(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+	vdp_context *vdp = gen->vdp;
+
+	if (cmd->num_args) {
+		char *arg = cmd->args[0].raw;
+		if (!strcmp(arg, "off")) {
+			vdp->dma_hook = NULL;
+			if (vdp->dma_log_file && vdp->dma_log_file != stderr) {
+				fclose(vdp->dma_log_file);
+			}
+			vdp->dma_log_file = NULL;
+			printf("DMA tracing disabled\n");
+			return 1;
+		}
+		FILE *f = fopen(arg, "w");
+		if (!f) {
+			fprintf(stderr, "Failed to open %s for writing\n", arg);
+			return 1;
+		}
+		if (vdp->dma_log_file && vdp->dma_log_file != stderr) {
+			fclose(vdp->dma_log_file);
+		}
+		vdp->dma_log_file = f;
+		fprintf(f, "# BlastEm DMA Trace\n");
+		fprintf(f, "# frame\tvcnt\thslot\ttype\tsrc\tdst_type\tdst_addr\tlen_words\n");
+		fflush(f);
+		printf("DMA tracing to %s\n", arg);
+	} else {
+		if (vdp->dma_log_file && vdp->dma_log_file != stderr) {
+			fclose(vdp->dma_log_file);
+		}
+		vdp->dma_log_file = NULL;
+		printf("DMA tracing to stderr\n");
+	}
+	vdp->dma_hook = on_dma_transfer;
+	return 1;
+}
+
 static uint8_t cmd_advance_m68k(debug_root *root, parsed_command *cmd)
 {
 	uint32_t address;
@@ -4380,6 +4458,17 @@ command_def genesis_commands[] = {
 		.impl = cmd_vdp_reg_break,
 		.min_args = 0,
 		.max_args = 2
+	},
+	{
+		.names = (const char *[]){
+			"dmatrace", "dmat", NULL
+		},
+		.usage = "dmatrace [FILE|off]",
+		.desc = "Log all DMA transfers to FILE (default: stderr). Use 'off' to stop.",
+		.impl = cmd_dma_trace,
+		.min_args = 0,
+		.max_args = 1,
+		.raw_args = 1
 	},
 #ifndef NO_Z80
 	{

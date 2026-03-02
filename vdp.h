@@ -195,6 +195,8 @@ struct vdp_context {
 	vdp_hook       dma_hook;
 	vdp_reg_hook   reg_hook;
 	vdp_data_hook  data_hook;
+	FILE           *dma_log_file;
+	uint8_t        dma_log_active;
 	uint32_t       kmod_buffer_storage;
 	uint32_t       kmod_buffer_length;
 	uint32_t       timer_start_cycle;

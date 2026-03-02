@@ -309,6 +309,46 @@ void lockon_media(char *lock_on_path)
 	}
 }
 
+static void cli_dma_hook(vdp_context *context)
+{
+	FILE *f = context->dma_log_file;
+	if (!f) {
+		return;
+	}
+	//For fills, the hook fires every FIFO drain. Only log once per DMA operation.
+	if (context->dma_log_active) {
+		return;
+	}
+	context->dma_log_active = 1;
+	uint8_t dma_type_bits = context->regs[REG_DMASRC_H] & 0xC0;
+	const char *type;
+	uint32_t src = 0;
+	if (dma_type_bits == 0xC0) {
+		type = "COPY";
+		src = (context->regs[REG_DMASRC_M] << 8) | context->regs[REG_DMASRC_L];
+	} else if (dma_type_bits == 0x80) {
+		type = "FILL";
+	} else {
+		type = "68K";
+		src = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
+		    | ((uint32_t)context->regs[REG_DMASRC_M] << 9)
+		    | ((uint32_t)context->regs[REG_DMASRC_L] << 1);
+	}
+	uint16_t len = (context->regs[REG_DMALEN_H] << 8) | context->regs[REG_DMALEN_L];
+	uint32_t dst_addr = context->address;
+	const char *dst_type;
+	switch (context->cd & 0xF) {
+	case 1:  dst_type = "VRAM";  break;
+	case 3:  dst_type = "CRAM";  break;
+	case 5:  dst_type = "VSRAM"; break;
+	default: dst_type = "???";   break;
+	}
+	fprintf(f, "%u\t%u\t%u\t%s\t0x%06X\t%s\t0x%04X\t%u\n",
+		context->frame, context->vcounter, context->hslot,
+		type, src, dst_type, dst_addr, len);
+	fflush(f);
+}
+
 static uint32_t opts = 0;
 static uint8_t force_region = 0;
 void init_system_with_media(char *path, system_type force_stype)
@@ -385,6 +425,7 @@ int main(int argc, char ** argv)
 	int loaded = 0;
 	system_type stype = SYSTEM_UNKNOWN, force_stype = SYSTEM_UNKNOWN;
 	char * romfname = NULL;
+	char *dma_log_path = NULL;
 	char * statefile = NULL;
 	char *reader_addr = NULL, *reader_port = NULL;
 	event_reader reader = {0};
@@ -395,6 +436,14 @@ int main(int argc, char ** argv)
 	char *port;
 	for (int i = 1; i < argc; i++) {
 		if (argv[i][0] == '-') {
+			if (!strcmp(argv[i], "--dma-log")) {
+				i++;
+				if (i >= argc) {
+					fatal_error("--dma-log must be followed by a filename\n");
+				}
+				dma_log_path = argv[i];
+				continue;
+			}
 			switch(argv[i][1]) {
 			case 'b':
 				i++;
@@ -533,6 +582,7 @@ int main(int argc, char ** argv)
 					"	-l          Log 68K code addresses (useful for assemblers)\n"
 					"	-y          Log individual YM-2612 channels to WAVE files\n"
 					"   -e FILE     Write hardware event log to FILE\n"
+				"   --dma-log FILE  Log all VDP DMA transfers to FILE\n"
 				);
 				return 0;
 			default:
@@ -679,6 +729,20 @@ int main(int argc, char ** argv)
 
 	current_system->debugger_type = dtype;
 	current_system->enter_debugger = start_in_debugger && menu == debug_target;
+	if (dma_log_path && current_system->get_vdp) {
+		vdp_context *vdp = current_system->get_vdp(current_system);
+		if (vdp) {
+			FILE *dma_file = fopen(dma_log_path, "w");
+			if (!dma_file) {
+				fatal_error("Failed to open DMA log file: %s\n", dma_log_path);
+			}
+			fprintf(dma_file, "# BlastEm DMA Trace\n");
+			fprintf(dma_file, "# frame\tvcnt\thslot\ttype\tsrc\tdst_type\tdst_addr\tlen_words\n");
+			fflush(dma_file);
+			vdp->dma_log_file = dma_file;
+			vdp->dma_hook = cli_dma_hook;
+		}
+	}
 #ifndef __EMSCRIPTEN__
 	current_system->start_context(current_system,  menu ? NULL : statefile);
 	render_video_loop();
