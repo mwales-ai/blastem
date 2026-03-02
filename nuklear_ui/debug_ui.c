@@ -51,7 +51,6 @@ static void plane_debug_ui(void)
 		bounds.w -= 100;
 		char buf[64];
 		if (nk_input_is_mouse_hovering_rect(&context->input, bounds)) {
-			//TODO: display plane position
 			int x = context->input.mouse.pos.x - bounds.x;
 			int y = context->input.mouse.pos.y - bounds.y;
 			switch (vdp->debug_modes[DEBUG_PLANE] & 3)
@@ -83,19 +82,81 @@ static void plane_debug_ui(void)
 					x &= 0xFF;
 				}
 				break;
-			case 3:
-				x >>= 1;
-				y >>= 1;
-				x -= 128;
-				y -= 128;
+			case 3: {
+				int sprite_x = x / 2 - 128;
+				int sprite_y = y / 2 - 128;
+				int hit = -1;
+				for (int s = vdp->sprite_debug_count - 1; s >= 0; s--) {
+					sprite_debug_entry *sde = &vdp->sprite_debug_table[s];
+					if (sprite_x >= sde->x && sprite_x < sde->x + sde->width &&
+					    sprite_y >= sde->y && sprite_y < sde->y + sde->height) {
+						hit = s;
+						break;
+					}
+				}
+				vdp->sprite_debug_hover = hit;
+				if (hit >= 0) {
+					sprite_debug_entry *sde = &vdp->sprite_debug_table[hit];
+					uint32_t rom_src = vdp_dma_lookup_source(vdp, sde->vram_addr);
+					int row_y = 5 * 32;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "Sprite #%d", sde->index);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "X:%-4d Y:%-4d", sde->x, sde->y);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "Size: %dx%d", sde->width, sde->height);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "Pat:$%03X", sde->pattern);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "VRAM:$%04X", sde->vram_addr);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "Pal:%d Pri:%d", sde->pal, sde->priority);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "Flip H:%d V:%d", sde->h_flip, sde->v_flip);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					if (rom_src) {
+						snprintf(buf, sizeof(buf), "ROM:$%06X", rom_src);
+					} else {
+						snprintf(buf, sizeof(buf), "ROM: ???");
+					}
+					nk_label(context, buf, NK_TEXT_LEFT);
+				} else {
+					x = sprite_x;
+					y = sprite_y;
+					nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 52, 150, 32));
+					snprintf(buf, sizeof(buf), "X: %d", x);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 32, 150, 32));
+					snprintf(buf, sizeof(buf), "Y: %d", y);
+					nk_label(context, buf, NK_TEXT_LEFT);
+				}
 				break;
 			}
-			nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 52, 150, 32));
-			snprintf(buf, sizeof(buf), "X: %d", x);
-			nk_label(context, buf, NK_TEXT_LEFT);
-			nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 32, 150, 32));
-			snprintf(buf, sizeof(buf), "Y: %d", y);
-			nk_label(context, buf, NK_TEXT_LEFT);
+			}
+			if ((vdp->debug_modes[DEBUG_PLANE] & 3) != 3) {
+				nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 52, 150, 32));
+				snprintf(buf, sizeof(buf), "X: %d", x);
+				nk_label(context, buf, NK_TEXT_LEFT);
+				nk_layout_space_push(context, nk_rect(0, windows[DEBUG_PLANE].tex_height - 32, 150, 32));
+				snprintf(buf, sizeof(buf), "Y: %d", y);
+				nk_label(context, buf, NK_TEXT_LEFT);
+			}
+		} else if ((vdp->debug_modes[DEBUG_PLANE] & 3) == 3) {
+			vdp->sprite_debug_hover = -1;
 		}
 		static const char* names[] = {
 			"Plane A",

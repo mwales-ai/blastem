@@ -1143,6 +1143,34 @@ static void read_sprite_x_mode4(vdp_context * context)
 	}
 }
 
+static void vdp_record_dma(vdp_context *context)
+{
+	// Only record 68K->VRAM transfers
+	if ((context->regs[REG_DMASRC_H] & 0xC0) != 0x00) return;
+	if ((context->cd & 0xF) != 1) return;
+
+	dma_history_entry *e = &context->dma_history[context->dma_history_idx];
+	e->src_addr = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
+	            | ((uint32_t)context->regs[REG_DMASRC_M] << 9)
+	            | ((uint32_t)context->regs[REG_DMASRC_L] << 1);
+	e->dst_addr = context->address;
+	e->length = ((context->regs[REG_DMALEN_H] << 8) | context->regs[REG_DMALEN_L]) * 2;
+	e->frame = context->frame;
+	context->dma_history_idx = (context->dma_history_idx + 1) % DMA_HISTORY_SIZE;
+}
+
+uint32_t vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr)
+{
+	for (int i = 0; i < DMA_HISTORY_SIZE; i++) {
+		int idx = (context->dma_history_idx - 1 - i + DMA_HISTORY_SIZE) % DMA_HISTORY_SIZE;
+		dma_history_entry *e = &context->dma_history[idx];
+		if (!e->length) continue;
+		if (vram_addr >= e->dst_addr && vram_addr < e->dst_addr + e->length)
+			return e->src_addr + (vram_addr - e->dst_addr);
+	}
+	return 0;
+}
+
 static void vdp_advance_dma(vdp_context * context)
 {
 	context->regs[REG_DMASRC_L] += 1;
@@ -1250,6 +1278,7 @@ static void external_slot(vdp_context * context)
 		if (context->fifo_read == context->fifo_write) {
 			if ((context->cd & 0x20) && (context->regs[REG_DMASRC_H] & DMA_TYPE_MASK) == DMA_FILL) {
 				context->flags |= FLAG_DMA_RUN;
+				vdp_record_dma(context);
 				if (context->dma_hook) {
 					context->dma_hook(context);
 				}
@@ -2607,6 +2636,7 @@ static void sprite_debug_mode5(pixel_t *fb, uint32_t pitch, vdp_context *context
 	//clear a single alpha channel bit so we can distinguish between actual bg color and sprite
 	//pixels that just happen to be the same color
 	bg_color &= 0xFEFFFFFF;
+	context->sprite_debug_count = 0;
 	pixel_t *line = fb;
 	pixel_t border_line = render_map_color(0, 0, 255);
 	pixel_t sprite_outline = render_map_color(255, 0, 255);
@@ -2660,6 +2690,20 @@ static void sprite_debug_mode5(pixel_t *fb, uint32_t pitch, vdp_context *context
 		uint16_t hflip = tileinfo & MAP_BIT_H_FLIP;
 		uint16_t vflip = tileinfo & MAP_BIT_V_FLIP;
 		uint32_t x = (((context->vdpmem[att_addr+ 2] & 0x3) << 8 | context->vdpmem[att_addr + 3]) & 0x1FF) * 2;
+		if (context->sprite_debug_count < context->max_sprites_frame) {
+			sprite_debug_entry *sde = &context->sprite_debug_table[context->sprite_debug_count++];
+			sde->index = index / 4;
+			sde->x = (x / 2) - 128;
+			sde->y = ((context->sat_cache[index] & 3) << 8 | context->sat_cache[index + 1]) - 128;
+			sde->width = (tile_width + 1) * 8;
+			sde->height = ((context->sat_cache[index+2] & 3) + 1) * 8;
+			sde->pattern = tileinfo & 0x7FF;
+			sde->vram_addr = (tileinfo & 0x7FF) << 5;
+			sde->pal = (tileinfo >> 13) & 3;
+			sde->priority = (tileinfo >> 15) & 1;
+			sde->h_flip = hflip ? 1 : 0;
+			sde->v_flip = vflip ? 1 : 0;
+		}
 		pixel_t *line = fb + y * pitch / sizeof(pixel_t) + x;
 		pixel_t *cur = line;
 		for (uint32_t cx = x, x2 = x + pixel_width; cx < x2; cx++)
@@ -2745,6 +2789,39 @@ static void sprite_debug_mode5(pixel_t *fb, uint32_t pitch, vdp_context *context
 		index = context->sat_cache[index+3] * 4;
 		if (!index) {
 			break;
+		}
+	}
+	// Highlight pass: draw green outline around hovered sprite
+	if (context->sprite_debug_hover >= 0 && context->sprite_debug_hover < context->sprite_debug_count) {
+		sprite_debug_entry *sde = &context->sprite_debug_table[context->sprite_debug_hover];
+		pixel_t highlight = render_map_color(0, 255, 0);
+		int sx = (sde->x + 128) * 2;
+		int sy = (sde->y + 128) * 2;
+		int sw = sde->width * 2;
+		int sh = sde->height * 2;
+		uint32_t stride = pitch / sizeof(pixel_t);
+		// Top edge
+		if (sy >= 0 && sy < 1024) {
+			pixel_t *row = fb + sy * stride;
+			for (int cx = sx; cx < sx + sw && cx < 1024; cx++) {
+				if (cx >= 0) row[cx] = highlight;
+			}
+		}
+		// Bottom edge
+		int bot = sy + sh - 1;
+		if (bot >= 0 && bot < 1024) {
+			pixel_t *row = fb + bot * stride;
+			for (int cx = sx; cx < sx + sw && cx < 1024; cx++) {
+				if (cx >= 0) row[cx] = highlight;
+			}
+		}
+		// Left and right edges
+		for (int cy = sy; cy < sy + sh && cy < 1024; cy++) {
+			if (cy < 0) continue;
+			pixel_t *row = fb + cy * stride;
+			if (sx >= 0 && sx < 1024) row[sx] = highlight;
+			int right = sx + sw - 1;
+			if (right >= 0 && right < 1024) row[right] = highlight;
 		}
 	}
 }
@@ -5901,12 +5978,14 @@ int vdp_control_port_write(vdp_context * context, uint16_t value, uint32_t cpu_c
 					vdp_run_context_full(context, context->cycles + 12 * ((context->regs[REG_MODE_2] & BIT_MODE_5) && (context->regs[REG_MODE_4] & BIT_H40) ? 4 : 5));
 					vdp_dma_started();
 					context->flags |= FLAG_DMA_RUN;
+					vdp_record_dma(context);
 					if (context->dma_hook) {
 						context->dma_hook(context);
 					}
 					return 1;
 				} else {
 					context->flags |= FLAG_DMA_RUN;
+					vdp_record_dma(context);
 					if (context->dma_hook) {
 						context->dma_hook(context);
 					}

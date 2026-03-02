@@ -160,6 +160,26 @@ typedef struct {
 	int16_t y;
 } sprite_info;
 
+#define DMA_HISTORY_SIZE 256
+
+typedef struct {
+	uint32_t src_addr;    // 68K source address (24-bit)
+	uint32_t dst_addr;    // VRAM destination address
+	uint32_t length;      // Transfer length in bytes
+	uint32_t frame;       // Frame number
+} dma_history_entry;
+
+typedef struct {
+	int16_t  x, y;          // Screen position (SAT value - 128)
+	uint8_t  width, height; // Size in pixels
+	uint8_t  index;         // SAT sprite index
+	uint8_t  pal;           // Palette line (0-3)
+	uint8_t  priority;      // Priority bit
+	uint8_t  h_flip, v_flip;
+	uint16_t pattern;       // Tile pattern index
+	uint16_t vram_addr;     // Tile base VRAM address
+} sprite_debug_entry;
+
 #define FIFO_SIZE 4
 
 typedef struct {
@@ -197,6 +217,11 @@ struct vdp_context {
 	vdp_data_hook  data_hook;
 	FILE           *dma_log_file;
 	uint8_t        dma_log_active;
+	dma_history_entry  dma_history[DMA_HISTORY_SIZE];
+	uint16_t           dma_history_idx;
+	sprite_debug_entry sprite_debug_table[MAX_SPRITES_FRAME];
+	uint8_t            sprite_debug_count;
+	int8_t             sprite_debug_hover;
 	uint32_t       kmod_buffer_storage;
 	uint32_t       kmod_buffer_length;
 	uint32_t       timer_start_cycle;
@@ -330,6 +355,8 @@ void vdp_dma_started(void);
 void vdp_replay_event(vdp_context *context, uint8_t event, event_reader *reader);
 uint16_t vdp_status(vdp_context *context);
 void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value);
+
+uint32_t vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr);
 
 extern uint16_t mode4_address_map[0x4000];
 
