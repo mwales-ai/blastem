@@ -1150,9 +1150,10 @@ static void read_sprite_x_mode4(vdp_context * context)
 
 static void vdp_record_dma(vdp_context *context)
 {
-	// Only record 68K->VRAM transfers (bit 7 clear = 68K source)
+	// Only record 68K->VRAM and 68K->CRAM transfers (bit 7 clear = 68K source)
 	if (context->regs[REG_DMASRC_H] & 0x80) return;
-	if ((context->cd & 0xF) != VRAM_WRITE) return;
+	uint8_t cd_type = context->cd & 0xF;
+	if (cd_type != VRAM_WRITE && cd_type != CRAM_WRITE) return;
 
 	dma_history_entry *e = &context->dma_history[context->dma_history_idx];
 	e->src_addr = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
@@ -1161,6 +1162,7 @@ static void vdp_record_dma(vdp_context *context)
 	e->dst_addr = context->address;
 	e->length = ((context->regs[REG_DMALEN_H] << 8) | context->regs[REG_DMALEN_L]) * 2;
 	e->frame = context->frame;
+	e->dest_type = cd_type;
 	context->dma_history_idx = (context->dma_history_idx + 1) % context->dma_history_size;
 }
 
@@ -1170,8 +1172,27 @@ int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *ro
 		int idx = (context->dma_history_idx - 1 - i + context->dma_history_size) % context->dma_history_size;
 		dma_history_entry *e = &context->dma_history[idx];
 		if (!e->length) continue;
+		if (e->dest_type != VRAM_WRITE) continue;
 		if (vram_addr >= e->dst_addr && vram_addr < e->dst_addr + e->length) {
 			*rom_addr_out = e->src_addr + (vram_addr - e->dst_addr);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int vdp_dma_lookup_cram_source(vdp_context *context, uint32_t cram_byte_addr, uint32_t cram_size, uint32_t *src_addr_out)
+{
+	for (uint32_t i = 0; i < context->dma_history_size; i++) {
+		int idx = (context->dma_history_idx - 1 - i + context->dma_history_size) % context->dma_history_size;
+		dma_history_entry *e = &context->dma_history[idx];
+		if (!e->length) continue;
+		if (e->dest_type != CRAM_WRITE) continue;
+		// Check if the CRAM byte range overlaps the DMA destination range
+		uint32_t dma_end = e->dst_addr + e->length;
+		uint32_t cram_end = cram_byte_addr + cram_size;
+		if (cram_byte_addr >= e->dst_addr && cram_end <= dma_end) {
+			*src_addr_out = e->src_addr + (cram_byte_addr - e->dst_addr);
 			return 1;
 		}
 	}

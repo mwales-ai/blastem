@@ -164,9 +164,10 @@ typedef struct {
 
 typedef struct {
 	uint32_t src_addr;    // 68K source address (24-bit)
-	uint32_t dst_addr;    // VRAM destination address
+	uint32_t dst_addr;    // Destination address (VRAM or CRAM)
 	uint32_t length;      // Transfer length in bytes
 	uint32_t frame;       // Frame number
+	uint8_t  dest_type;   // cd & 0xF: VRAM_WRITE(1) or CRAM_WRITE(3)
 } dma_history_entry;
 
 typedef struct {
@@ -358,6 +359,7 @@ uint16_t vdp_status(vdp_context *context);
 void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value);
 
 int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out);
+int vdp_dma_lookup_cram_source(vdp_context *context, uint32_t cram_byte_addr, uint32_t cram_size, uint32_t *src_addr_out);
 extern uint32_t dma_history_config_size;
 
 extern uint16_t mode4_address_map[0x4000];
