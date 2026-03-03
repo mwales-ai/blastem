@@ -138,6 +138,55 @@ static void plane_debug_ui(void)
 						snprintf(buf, sizeof(buf), "DMA: not found");
 					}
 					nk_label(context, buf, NK_TEXT_LEFT);
+					// Palette color swatches
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 16 * 9 + 1, 9));
+					{
+						struct nk_command_buffer *canvas = nk_window_get_canvas(context);
+						struct nk_rect widget_bounds;
+						nk_widget(&widget_bounds, context);
+						int pal_base = sde->pal * 16;
+						for (int i = 0; i < 16; i++) {
+							pixel_t px = vdp->colors[pal_base + i];
+#if defined(USE_RGB565)
+							uint8_t cr = (px >> 8) & 0xF8;
+							uint8_t cg = (px >> 3) & 0xFC;
+							uint8_t cb = (px << 3) & 0xF8;
+#elif defined(USE_GLES)
+							uint8_t cr = px & 0xFF;
+							uint8_t cg = (px >> 8) & 0xFF;
+							uint8_t cb = (px >> 16) & 0xFF;
+#else
+							uint8_t cr = (px >> 16) & 0xFF;
+							uint8_t cg = (px >> 8) & 0xFF;
+							uint8_t cb = px & 0xFF;
+#endif
+							struct nk_rect swatch = nk_rect(widget_bounds.x + i * 9, widget_bounds.y, 8, 8);
+							nk_fill_rect(canvas, swatch, 0, nk_rgb(cr, cg, cb));
+						}
+					}
+					// CRAM address range
+					row_y += 10;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					snprintf(buf, sizeof(buf), "CRAM: $%02X-$%02X", sde->pal * 32, sde->pal * 32 + 31);
+					nk_label(context, buf, NK_TEXT_LEFT);
+					// CRAM DMA source lookup
+					row_y += 20;
+					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
+					{
+						uint32_t cram_src = 0;
+						int cram_dma_found = vdp_dma_lookup_cram_source(vdp, sde->pal * 32, 32, &cram_src);
+						if (cram_dma_found) {
+							if (cram_src >= 0xFF0000) {
+								snprintf(buf, sizeof(buf), "Pal DMA:RAM $%06X", cram_src);
+							} else {
+								snprintf(buf, sizeof(buf), "Pal DMA:ROM $%06X", cram_src);
+							}
+						} else {
+							snprintf(buf, sizeof(buf), "Pal DMA: not found");
+						}
+					}
+					nk_label(context, buf, NK_TEXT_LEFT);
 				} else {
 					x = sprite_x;
 					y = sprite_y;
