@@ -160,7 +160,7 @@ typedef struct {
 	int16_t y;
 } sprite_info;
 
-#define DMA_HISTORY_SIZE 256
+#define DMA_HISTORY_DEFAULT 1024
 
 typedef struct {
 	uint32_t src_addr;    // 68K source address (24-bit)
@@ -217,8 +217,9 @@ struct vdp_context {
 	vdp_data_hook  data_hook;
 	FILE           *dma_log_file;
 	uint8_t        dma_log_active;
-	dma_history_entry  dma_history[DMA_HISTORY_SIZE];
-	uint16_t           dma_history_idx;
+	dma_history_entry  *dma_history;
+	uint32_t           dma_history_size;
+	uint32_t           dma_history_idx;
 	sprite_debug_entry sprite_debug_table[MAX_SPRITES_FRAME];
 	uint8_t            sprite_debug_count;
 	int8_t             sprite_debug_hover;
@@ -357,6 +358,7 @@ uint16_t vdp_status(vdp_context *context);
 void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value);
 
 int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out);
+extern uint32_t dma_history_config_size;
 
 extern uint16_t mode4_address_map[0x4000];
 

@@ -444,6 +444,17 @@ int main(int argc, char ** argv)
 				dma_log_path = argv[i];
 				continue;
 			}
+			if (!strcmp(argv[i], "--dma-history")) {
+				i++;
+				if (i >= argc) {
+					fatal_error("--dma-history must be followed by a size (number of entries)\n");
+				}
+				dma_history_config_size = atoi(argv[i]);
+				if (dma_history_config_size < 16) {
+					dma_history_config_size = 16;
+				}
+				continue;
+			}
 			switch(argv[i][1]) {
 			case 'b':
 				i++;

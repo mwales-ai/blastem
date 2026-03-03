@@ -171,9 +171,13 @@ static void update_color_map(vdp_context *context, uint16_t index, uint16_t valu
 
 static uint8_t static_table_init_done;
 
+uint32_t dma_history_config_size = DMA_HISTORY_DEFAULT;
+
 vdp_context *init_vdp_context_int(uint8_t region_pal, uint8_t has_max_vsram, uint8_t type)
 {
 	vdp_context *context = calloc(1, sizeof(vdp_context) + VRAM_SIZE);
+	context->dma_history_size = dma_history_config_size;
+	context->dma_history = calloc(context->dma_history_size, sizeof(dma_history_entry));
 	context->sprite_draws = MAX_SPRITES_LINE;
 	context->fifo_write = 0;
 	context->fifo_read = -1;
@@ -537,6 +541,7 @@ vdp_context *init_vdp_context(uint8_t region_pal, uint8_t has_max_vsram, uint8_t
 
 void vdp_free(vdp_context *context)
 {
+	free(context->dma_history);
 	if (headless) {
 		free(context->fb);
 	}
@@ -1156,13 +1161,13 @@ static void vdp_record_dma(vdp_context *context)
 	e->dst_addr = context->address;
 	e->length = ((context->regs[REG_DMALEN_H] << 8) | context->regs[REG_DMALEN_L]) * 2;
 	e->frame = context->frame;
-	context->dma_history_idx = (context->dma_history_idx + 1) % DMA_HISTORY_SIZE;
+	context->dma_history_idx = (context->dma_history_idx + 1) % context->dma_history_size;
 }
 
 int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out)
 {
-	for (int i = 0; i < DMA_HISTORY_SIZE; i++) {
-		int idx = (context->dma_history_idx - 1 - i + DMA_HISTORY_SIZE) % DMA_HISTORY_SIZE;
+	for (uint32_t i = 0; i < context->dma_history_size; i++) {
+		int idx = (context->dma_history_idx - 1 - i + context->dma_history_size) % context->dma_history_size;
 		dma_history_entry *e = &context->dma_history[idx];
 		if (!e->length) continue;
 		if (vram_addr >= e->dst_addr && vram_addr < e->dst_addr + e->length) {
