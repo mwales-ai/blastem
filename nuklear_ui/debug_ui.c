@@ -46,9 +46,8 @@ static void plane_debug_ui(void)
 		nk_layout_space_begin(context, NK_STATIC, windows[DEBUG_PLANE].tex_height, INT_MAX);
 		nk_layout_space_push(context, nk_rect(150, 0, windows[DEBUG_PLANE].tex_width, windows[DEBUG_PLANE].tex_height));
 		nk_image(context, main_image);
-		struct nk_rect bounds = nk_layout_widget_bounds(context);
-		bounds.x += 100;
-		bounds.w -= 100;
+		struct nk_rect bounds = nk_layout_space_rect_to_screen(context,
+			nk_rect(150, 0, windows[DEBUG_PLANE].tex_width, windows[DEBUG_PLANE].tex_height));
 		char buf[64];
 		if (nk_input_is_mouse_hovering_rect(&context->input, bounds)) {
 			int x = context->input.mouse.pos.x - bounds.x;
