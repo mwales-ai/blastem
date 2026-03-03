@@ -1145,9 +1145,9 @@ static void read_sprite_x_mode4(vdp_context * context)
 
 static void vdp_record_dma(vdp_context *context)
 {
-	// Only record 68K->VRAM transfers
-	if ((context->regs[REG_DMASRC_H] & 0xC0) != 0x00) return;
-	if ((context->cd & 0xF) != 1) return;
+	// Only record 68K->VRAM transfers (bit 7 clear = 68K source)
+	if (context->regs[REG_DMASRC_H] & 0x80) return;
+	if ((context->cd & 0xF) != VRAM_WRITE) return;
 
 	dma_history_entry *e = &context->dma_history[context->dma_history_idx];
 	e->src_addr = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
@@ -1159,14 +1159,16 @@ static void vdp_record_dma(vdp_context *context)
 	context->dma_history_idx = (context->dma_history_idx + 1) % DMA_HISTORY_SIZE;
 }
 
-uint32_t vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr)
+int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out)
 {
 	for (int i = 0; i < DMA_HISTORY_SIZE; i++) {
 		int idx = (context->dma_history_idx - 1 - i + DMA_HISTORY_SIZE) % DMA_HISTORY_SIZE;
 		dma_history_entry *e = &context->dma_history[idx];
 		if (!e->length) continue;
-		if (vram_addr >= e->dst_addr && vram_addr < e->dst_addr + e->length)
-			return e->src_addr + (vram_addr - e->dst_addr);
+		if (vram_addr >= e->dst_addr && vram_addr < e->dst_addr + e->length) {
+			*rom_addr_out = e->src_addr + (vram_addr - e->dst_addr);
+			return 1;
+		}
 	}
 	return 0;
 }

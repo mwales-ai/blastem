@@ -356,7 +356,7 @@ void vdp_replay_event(vdp_context *context, uint8_t event, event_reader *reader)
 uint16_t vdp_status(vdp_context *context);
 void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value);
 
-uint32_t vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr);
+int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out);
 
 extern uint16_t mode4_address_map[0x4000];
 

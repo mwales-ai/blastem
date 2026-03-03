@@ -96,7 +96,8 @@ static void plane_debug_ui(void)
 				vdp->sprite_debug_hover = hit;
 				if (hit >= 0) {
 					sprite_debug_entry *sde = &vdp->sprite_debug_table[hit];
-					uint32_t rom_src = vdp_dma_lookup_source(vdp, sde->vram_addr);
+					uint32_t dma_src = 0;
+					int dma_found = vdp_dma_lookup_source(vdp, sde->vram_addr, &dma_src);
 					int row_y = 5 * 32;
 					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
 					snprintf(buf, sizeof(buf), "Sprite #%d", sde->index);
@@ -127,10 +128,14 @@ static void plane_debug_ui(void)
 					nk_label(context, buf, NK_TEXT_LEFT);
 					row_y += 20;
 					nk_layout_space_push(context, nk_rect(0, row_y, 150, 20));
-					if (rom_src) {
-						snprintf(buf, sizeof(buf), "ROM:$%06X", rom_src);
+					if (dma_found) {
+						if (dma_src >= 0xFF0000) {
+							snprintf(buf, sizeof(buf), "DMA:RAM $%06X", dma_src);
+						} else {
+							snprintf(buf, sizeof(buf), "DMA:ROM $%06X", dma_src);
+						}
 					} else {
-						snprintf(buf, sizeof(buf), "ROM: ???");
+						snprintf(buf, sizeof(buf), "DMA: not found");
 					}
 					nk_label(context, buf, NK_TEXT_LEFT);
 				} else {
