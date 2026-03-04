@@ -117,6 +117,13 @@ struct m68k_context {
 	uint16_t        wp_hit_value;
 	uint16_t        wp_old_value;
 	uint8_t         wp_hit;
+	uint32_t        read_watchpoint_min;
+	uint32_t        read_watchpoint_max;
+	m68k_watchpoint *read_watchpoints;
+	uint32_t        num_read_watchpoints;
+	uint32_t        rp_storage;
+	uint32_t        rp_hit_address;
+	uint8_t         rp_hit;
 	uint8_t         int_pending;
 	uint8_t         trace_pending;
 	uint8_t         should_return;
@@ -138,6 +145,8 @@ void insert_breakpoint(m68k_context * context, uint32_t address, debug_handler b
 void remove_breakpoint(m68k_context * context, uint32_t address);
 void m68k_add_watchpoint(m68k_context *context, uint32_t address, uint32_t size);
 void m68k_remove_watchpoint(m68k_context *context, uint32_t address, uint32_t size);
+void m68k_add_read_watchpoint(m68k_context *context, uint32_t address, uint32_t size);
+void m68k_remove_read_watchpoint(m68k_context *context, uint32_t address, uint32_t size);
 m68k_context * m68k_handle_code_write(uint32_t address, m68k_context * context);
 uint32_t get_instruction_start(m68k_options *opts, uint32_t address);
 uint16_t m68k_get_ir(m68k_context *context);

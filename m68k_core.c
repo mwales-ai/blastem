@@ -960,6 +960,107 @@ void m68k_remove_watchpoint(m68k_context *context, uint32_t address, uint32_t si
 	}
 }
 
+static m68k_watchpoint *m68k_find_read_watchpoint(uint32_t address, m68k_context *context)
+{
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (address >= context->read_watchpoints[i].start && address <= context->read_watchpoints[i].end) {
+			return context->read_watchpoints + i;
+		}
+	}
+	return NULL;
+}
+
+static void *m68k_read_watchpoint_check16(uint32_t address, void *vcontext, uint16_t value)
+{
+	m68k_context *context = vcontext;
+	m68k_watchpoint *watch = m68k_find_read_watchpoint(address, context);
+	if (!watch) {
+		return vcontext;
+	}
+	context->rp_hit_address = address;
+	context->rp_hit = 1;
+	context->target_cycle = context->sync_cycle = context->cycles;
+	return vcontext;
+}
+
+static void *m68k_read_watchpoint_check8(uint32_t address, void *vcontext, uint8_t value)
+{
+	m68k_context *context = vcontext;
+	m68k_watchpoint *watch = m68k_find_read_watchpoint(address, context);
+	if (!watch) {
+		return vcontext;
+	}
+	context->rp_hit_address = address;
+	context->rp_hit = 1;
+	context->target_cycle = context->sync_cycle = context->cycles;
+	return vcontext;
+}
+
+static void m68k_enable_read_watchpoints(m68k_context *context)
+{
+	if (context->opts->gen.check_read_watchpoints_16) {
+		return;
+	}
+	context->opts->gen.check_read_watchpoints_16 = m68k_read_watchpoint_check16;
+	context->opts->gen.check_read_watchpoints_8 = m68k_read_watchpoint_check8;
+	//re-generate read handlers with read watchpoints enabled
+	code_ptr new_read16 = gen_mem_fun(&context->opts->gen, context->opts->gen.memmap, context->opts->gen.memmap_chunks, READ_16, NULL);
+	code_ptr new_read8 = gen_mem_fun(&context->opts->gen, context->opts->gen.memmap, context->opts->gen.memmap_chunks, READ_8, NULL);
+
+	//patch old read handlers to point to the new ones
+	code_info code = {
+		.cur = context->opts->read_16,
+		.last = context->opts->read_16 + 256
+	};
+	jmp(&code, new_read16);
+	code.cur = context->opts->read_8;
+	code.last = code.cur + 256;
+	jmp(&code, new_read8);
+	context->opts->read_16 = new_read16;
+	context->opts->read_8 = new_read8;
+}
+
+void m68k_add_read_watchpoint(m68k_context *context, uint32_t address, uint32_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (context->read_watchpoints[i].start == address && context->read_watchpoints[i].end == end) {
+			return;
+		}
+	}
+	m68k_enable_read_watchpoints(context);
+	if (context->rp_storage == context->num_read_watchpoints) {
+		context->rp_storage = context->rp_storage ? context->rp_storage * 2 : 4;
+		context->read_watchpoints = realloc(context->read_watchpoints, context->rp_storage * sizeof(m68k_watchpoint));
+	}
+	context->read_watchpoints[context->num_read_watchpoints++] = (m68k_watchpoint){
+		.start = address,
+		.end = end,
+		.check_change = 0
+	};
+	if (context->read_watchpoint_min > address) {
+		context->read_watchpoint_min = address;
+	}
+	if (context->read_watchpoint_max < end) {
+		context->read_watchpoint_max = end;
+	}
+}
+
+void m68k_remove_read_watchpoint(m68k_context *context, uint32_t address, uint32_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (context->read_watchpoints[i].start == address && context->read_watchpoints[i].end == end) {
+			context->read_watchpoints[i] = context->read_watchpoints[context->num_read_watchpoints-1];
+			context->num_read_watchpoints--;
+			return;
+		}
+	}
+}
+
 typedef enum {
 	RAW_FUNC = 1,
 	BINARY_ARITH,

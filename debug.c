@@ -384,7 +384,7 @@ debug_root *find_root(void *cpu)
 
 bp_def ** find_breakpoint(bp_def ** cur, uint32_t address, uint8_t type)
 {
-	if (type == BP_TYPE_CPU_WATCH) {
+	if (type == BP_TYPE_CPU_WATCH || type == BP_TYPE_CPU_READ_WATCH) {
 		while (*cur) {
 			if ((*cur)->type == type && address >= (*cur)->address && address < ((*cur)->address + (*cur)->mask)) {
 				break;
@@ -3567,6 +3567,8 @@ static uint8_t cmd_delete_m68k(debug_root *root, parsed_command *cmd)
 		remove_breakpoint(root->cpu_context, tmp->address);
 	} else if (tmp->type == BP_TYPE_CPU_WATCH) {
 		m68k_remove_watchpoint(root->cpu_context, tmp->address, tmp->mask);
+	} else if (tmp->type == BP_TYPE_CPU_READ_WATCH) {
+		m68k_remove_read_watchpoint(root->cpu_context, tmp->address, tmp->mask);
 	}
 	*this_bp = (*this_bp)->next;
 	if (tmp->commands) {
@@ -3625,6 +3627,34 @@ static uint8_t cmd_watchpoint_m68k(debug_root *root, parsed_command *cmd)
 	new_bp->type = BP_TYPE_CPU_WATCH;
 	root->breakpoints = new_bp;
 	printf("68K Watchpoint %d set for $%X\n", new_bp->index, address);
+	return 1;
+}
+
+static uint8_t cmd_read_watchpoint_m68k(debug_root *root, parsed_command *cmd)
+{
+	uint32_t address;
+	if (!debug_cast_int(cmd->args[0].value, &address)) {
+		fprintf(stderr, "First argument to readwatch must be an integer\n");
+		return 1;
+	}
+	uint32_t size;
+	if (cmd->num_args > 1) {
+		if (!debug_cast_int(cmd->args[1].value, &size)) {
+			fprintf(stderr, "Second argument to readwatch must be an integer if provided\n");
+			return 1;
+		}
+	} else {
+		size = (address & 1) ? 1 : 2;
+	}
+	m68k_add_read_watchpoint(root->cpu_context, address, size);
+	bp_def *new_bp = calloc(1, sizeof(bp_def));
+	new_bp->next = root->breakpoints;
+	new_bp->address = address;
+	new_bp->mask = size;
+	new_bp->index = root->bp_index++;
+	new_bp->type = BP_TYPE_CPU_READ_WATCH;
+	root->breakpoints = new_bp;
+	printf("68K Read Watchpoint %d set for $%X\n", new_bp->index, address);
 	return 1;
 }
 
@@ -4356,6 +4386,16 @@ command_def m68k_commands[] = {
 	},
 	{
 		.names = (const char *[]){
+			"readwatch", "rw", NULL
+		},
+		.usage = "readwatch ADDRESS [SIZE]",
+		.desc = "Set a read watchpoint at ADDRESS with an optional SIZE in bytes. SIZE defaults to 2 for even address and 1 for odd",
+		.impl = cmd_read_watchpoint_m68k,
+		.min_args = 1,
+		.max_args = 2
+	},
+	{
+		.names = (const char *[]){
 			"advance", NULL
 		},
 		.usage = "advance ADDRESS",
@@ -4559,6 +4599,8 @@ static uint8_t cmd_delete_z80(debug_root *root, parsed_command *cmd)
 		zremove_breakpoint(root->cpu_context, tmp->address);
 	} else if (tmp->type == BP_TYPE_CPU_WATCH) {
 		z80_remove_watchpoint(root->cpu_context, tmp->address, tmp->mask);
+	} else if (tmp->type == BP_TYPE_CPU_READ_WATCH) {
+		z80_remove_read_watchpoint(root->cpu_context, tmp->address, tmp->mask);
 	}
 	*this_bp = (*this_bp)->next;
 	if (tmp->commands) {
@@ -4614,6 +4656,32 @@ static uint8_t cmd_watchpoint_z80(debug_root *root, parsed_command *cmd)
 	new_bp->type = BP_TYPE_CPU_WATCH;
 	root->breakpoints = new_bp;
 	printf("Z80 Watchpoint %d set for $%X\n", new_bp->index, address);
+	return 1;
+}
+
+static uint8_t cmd_read_watchpoint_z80(debug_root *root, parsed_command *cmd)
+{
+	uint32_t address;
+	if (!debug_cast_int(cmd->args[0].value, &address)) {
+		fprintf(stderr, "First argument to readwatch must be an integer\n");
+		return 1;
+	}
+	uint32_t size = 1;
+	if (cmd->num_args > 1) {
+		if (!debug_cast_int(cmd->args[1].value, &size)) {
+			fprintf(stderr, "Second argument to readwatch must be an integer if provided\n");
+			return 1;
+		}
+	}
+	z80_add_read_watchpoint(root->cpu_context, address, size);
+	bp_def *new_bp = calloc(1, sizeof(bp_def));
+	new_bp->next = root->breakpoints;
+	new_bp->address = address;
+	new_bp->mask = size;
+	new_bp->index = root->bp_index++;
+	new_bp->type = BP_TYPE_CPU_READ_WATCH;
+	root->breakpoints = new_bp;
+	printf("Z80 Read Watchpoint %d set for $%X\n", new_bp->index, address);
 	return 1;
 }
 
@@ -4897,6 +4965,16 @@ command_def z80_commands[] = {
 		.usage = "watchpoint ADDRESS [SIZE]",
 		.desc = "Set a watchpoint at ADDRESS with an optional SIZE in bytes. SIZE defaults to 1",
 		.impl = cmd_watchpoint_z80,
+		.min_args = 1,
+		.max_args = 2
+	},
+	{
+		.names = (const char *[]){
+			"readwatch", "rw", NULL
+		},
+		.usage = "readwatch ADDRESS [SIZE]",
+		.desc = "Set a read watchpoint at ADDRESS with an optional SIZE in bytes. SIZE defaults to 1",
+		.impl = cmd_read_watchpoint_z80,
 		.min_args = 1,
 		.max_args = 2
 	},
@@ -6073,6 +6151,35 @@ z80_context * zdebugger(z80_context * context, uint16_t address)
 			}
 		}
 	}
+	if (context->rp_hit) {
+		context->rp_hit = 0;
+		this_bp = find_breakpoint(&root->breakpoints, context->rp_hit_address, BP_TYPE_CPU_READ_WATCH);
+		if (*this_bp) {
+			if ((*this_bp)->condition) {
+				debug_val condres;
+				if (eval_expr(root, (*this_bp)->condition, &condres)) {
+					if (!condres.v.u32) {
+						return context;
+					}
+				} else {
+					fprintf(stderr, "Failed to eval condition for Z80 read watchpoint %u\n", (*this_bp)->index);
+					free_expr((*this_bp)->condition);
+					(*this_bp)->condition = NULL;
+				}
+			}
+			debugging = 1;
+			for (uint32_t i = 0; debugging && i < (*this_bp)->num_commands; i++)
+			{
+				debugging = run_command(root, (*this_bp)->commands + i);
+			}
+			if (debugging) {
+				printf("Z80 Read Watchpoint %d hit at $%X\n", (*this_bp)->index, context->rp_hit_address);
+			} else {
+				fflush(stdout);
+				return context;
+			}
+		}
+	}
 #endif
 	uint8_t * pc = get_native_pointer(address, (void **)context->mem_pointers, &context->Z80_OPTS->gen);
 	if (!pc) {
@@ -6188,6 +6295,34 @@ void debugger(void *vcontext, uint32_t address)
 				} else {
 					printf("68K Watchpoint %d hit\n", (*this_bp)->index);
 				}
+			} else {
+				fflush(stdout);
+				return;
+			}
+		}
+	}
+	if (context->rp_hit) {
+		context->rp_hit = 0;
+		this_bp = find_breakpoint(&root->breakpoints, context->rp_hit_address, BP_TYPE_CPU_READ_WATCH);
+		if (*this_bp) {
+			if ((*this_bp)->condition) {
+				debug_val condres;
+				if (eval_expr(root, (*this_bp)->condition, &condres)) {
+					if (!condres.v.u32) {
+						return;
+					}
+				} else {
+					fprintf(stderr, "Failed to eval condition for M68K read watchpoint %u\n", (*this_bp)->index);
+					free_expr((*this_bp)->condition);
+					(*this_bp)->condition = NULL;
+				}
+			}
+			for (uint32_t i = 0; debugging && i < (*this_bp)->num_commands; i++)
+			{
+				debugging = run_command(root, (*this_bp)->commands + i);
+			}
+			if (debugging) {
+				printf("68K Read Watchpoint %d hit at $%X\n", (*this_bp)->index, context->rp_hit_address);
 			} else {
 				fflush(stdout);
 				return;

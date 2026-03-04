@@ -96,6 +96,13 @@ struct z80_context {
 	uint8_t           wp_hit_value;
 	uint8_t           wp_old_value;
 	uint8_t           wp_hit;
+	z80_watchpoint    *read_watchpoints;
+	uint32_t          num_read_watchpoints;
+	uint32_t          rp_storage;
+	uint16_t          read_watchpoint_min;
+	uint16_t          read_watchpoint_max;
+	uint16_t          rp_hit_address;
+	uint8_t           rp_hit;
 	uint8_t           breakpoint_flags[(16 * 1024)/sizeof(uint8_t)];
 	uint8_t *         bp_handler;
 	uint8_t *         bp_stub;
@@ -123,6 +130,8 @@ void zinsert_breakpoint(z80_context * context, uint16_t address, uint8_t * bp_ha
 void zremove_breakpoint(z80_context * context, uint16_t address);
 void z80_add_watchpoint(z80_context *context, uint16_t address, uint16_t size);
 void z80_remove_watchpoint(z80_context *context, uint32_t address, uint32_t size);
+void z80_add_read_watchpoint(z80_context *context, uint16_t address, uint16_t size);
+void z80_remove_read_watchpoint(z80_context *context, uint32_t address, uint32_t size);
 void z80_run(z80_context * context, uint32_t target_cycle);
 void z80_assert_reset(z80_context * context, uint32_t cycle);
 void z80_clear_reset(z80_context * context, uint32_t cycle);

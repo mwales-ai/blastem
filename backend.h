@@ -62,6 +62,8 @@ typedef struct {
 	code_ptr           handle_align_error_read;
 	watchpoint16_fun   check_watchpoints_16;
 	watchpoint8_fun    check_watchpoints_8;
+	watchpoint16_fun   check_read_watchpoints_16;
+	watchpoint8_fun    check_read_watchpoints_8;
 	system_str_fun_r8  debug_cmd_handler;
 	uint32_t           memmap_chunks;
 	uint32_t           address_mask;
@@ -71,6 +73,7 @@ typedef struct {
 	uint32_t           move_pc_off;
 	uint32_t           move_pc_size;
 	int32_t            watchpoint_range_off;
+	int32_t            read_watchpoint_range_off;
 	int32_t            mem_ptr_off;
 	int32_t            ram_flags_off;
 	uint8_t            ram_flags_shift;

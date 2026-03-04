@@ -3208,6 +3208,7 @@ void init_z80_opts(z80_options * options, memmap_chunk const * chunks, uint32_t 
 	options->gen.bus_cycles = 3;
 	options->gen.clock_divider = clock_divider;
 	options->gen.watchpoint_range_off = offsetof(z80_context, watchpoint_min);
+	options->gen.read_watchpoint_range_off = offsetof(z80_context, read_watchpoint_min);
 	options->gen.mem_ptr_off = offsetof(z80_context, mem_pointers);
 	options->gen.ram_flags_off = offsetof(z80_context, ram_code_flags);
 	options->gen.ram_flags_shift = 7;
@@ -3993,6 +3994,80 @@ void z80_remove_watchpoint(z80_context *context, uint32_t address, uint32_t size
 		if (context->watchpoints[i].start == address && context->watchpoints[i].end == end) {
 			context->watchpoints[i] = context->watchpoints[context->num_watchpoints-1];
 			context->num_watchpoints--;
+			return;
+		}
+	}
+}
+
+static void *z80_read_watchpoint_check(uint32_t address, void *vcontext, uint8_t value)
+{
+	z80_context *context = vcontext;
+	address &= 0xFFFF;
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (address >= context->read_watchpoints[i].start && address <= context->read_watchpoints[i].end) {
+			context->rp_hit_address = address;
+			context->rp_hit = 1;
+			context->target_cycle = context->sync_cycle = context->current_cycle;
+			return vcontext;
+		}
+	}
+	return vcontext;
+}
+
+static void z80_enable_read_watchpoints(z80_context *context)
+{
+	if (context->options->gen.check_read_watchpoints_8) {
+		return;
+	}
+	context->read_watchpoint_min = 0xFFFF;
+	context->read_watchpoint_max = 0;
+	context->options->gen.check_read_watchpoints_8 = z80_read_watchpoint_check;
+	code_ptr new_read8 = gen_mem_fun(&context->options->gen, context->options->gen.memmap, context->options->gen.memmap_chunks, READ_8, NULL);
+
+	code_info code = {
+		.cur = context->options->read_8,
+		.last = context->options->read_8 + 256
+	};
+	jmp(&code, new_read8);
+	context->options->read_8 = new_read8;
+}
+
+void z80_add_read_watchpoint(z80_context *context, uint16_t address, uint16_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (context->read_watchpoints[i].start == address && context->read_watchpoints[i].end == end) {
+			return;
+		}
+	}
+	z80_enable_read_watchpoints(context);
+	if (context->rp_storage == context->num_read_watchpoints) {
+		context->rp_storage = context->rp_storage ? context->rp_storage * 2 : 4;
+		context->read_watchpoints = realloc(context->read_watchpoints, context->rp_storage * sizeof(z80_watchpoint));
+	}
+	context->read_watchpoints[context->num_read_watchpoints++] = (z80_watchpoint){
+		.start = address,
+		.end = end,
+		.check_change = 0
+	};
+	if (context->read_watchpoint_min > address) {
+		context->read_watchpoint_min = address;
+	}
+	if (context->read_watchpoint_max < end) {
+		context->read_watchpoint_max = end;
+	}
+}
+
+void z80_remove_read_watchpoint(z80_context *context, uint32_t address, uint32_t size)
+{
+	uint32_t end = address + size - 1;
+	for (uint32_t i = 0; i < context->num_read_watchpoints; i++)
+	{
+		if (context->read_watchpoints[i].start == address && context->read_watchpoints[i].end == end) {
+			context->read_watchpoints[i] = context->read_watchpoints[context->num_read_watchpoints-1];
+			context->num_read_watchpoints--;
 			return;
 		}
 	}
