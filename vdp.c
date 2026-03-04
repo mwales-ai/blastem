@@ -1199,6 +1199,54 @@ int vdp_dma_lookup_cram_source(vdp_context *context, uint32_t cram_byte_addr, ui
 	return 0;
 }
 
+uint32_t vdp_get_plane_a_base(vdp_context *context)
+{
+	return (context->regs[REG_SCROLL_A] & 0x38) << 10;
+}
+
+uint32_t vdp_get_plane_b_base(vdp_context *context)
+{
+	return (context->regs[REG_SCROLL_B] & 0x7) << 13;
+}
+
+uint32_t vdp_get_nametable_stride(vdp_context *context)
+{
+	switch (context->regs[REG_SCROLL] & 0x3) {
+	case 0: return 32;
+	case 1: return 64;
+	case 3: return 128;
+	default: return 32;
+	}
+}
+
+void vdp_get_visible_dimensions(vdp_context *context, uint32_t *width_tiles, uint32_t *height_tiles)
+{
+	*width_tiles = context->regs[REG_MODE_4] & BIT_H40 ? 40 : 32;
+	*height_tiles = context->flags2 & FLAG2_REGION_PAL ? 30 : 28;
+}
+
+int vdp_find_tile_in_rom(uint8_t *vram_tile, uint16_t *cart, uint32_t rom_size, uint32_t *rom_offset_out)
+{
+	// cart[] is byteswapped to native order; VRAM is big-endian bytes
+	// Compare as 16-bit words: cart[n] == (vram[2n] << 8) | vram[2n+1]
+	if (rom_size < 32) return 0;
+	uint32_t word_limit = (rom_size - 32) / 2;
+	for (uint32_t w = 0; w <= word_limit; w++) {
+		uint16_t first_vram = (vram_tile[0] << 8) | vram_tile[1];
+		if (cart[w] != first_vram) continue;
+		int match = 1;
+		for (int i = 1; i < 16; i++) {
+			uint16_t vw = (vram_tile[i*2] << 8) | vram_tile[i*2+1];
+			if (cart[w+i] != vw) { match = 0; break; }
+		}
+		if (match) {
+			*rom_offset_out = w * 2;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void vdp_advance_dma(vdp_context * context)
 {
 	context->regs[REG_DMASRC_L] += 1;

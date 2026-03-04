@@ -4428,6 +4428,205 @@ command_def m68k_commands[] = {
 
 #define NUM_68K (sizeof(m68k_commands)/sizeof(*m68k_commands))
 
+static int is_tile_blank(uint8_t *vram_tile)
+{
+	for (int i = 0; i < 32; i++) {
+		if (vram_tile[i]) return 0;
+	}
+	return 1;
+}
+
+static void json_write_hex_byte(FILE *f, uint8_t b)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	fputc(hex[b >> 4], f);
+	fputc(hex[b & 0xF], f);
+}
+
+static uint8_t cmd_screencap(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+	vdp_context *vdp = gen->vdp;
+
+	// Determine output file and plane
+	const char *filename = "screencap.json";
+	int use_plane_b = 0;
+	for (int i = 0; i < cmd->num_args; i++) {
+		char *arg = cmd->args[i].raw;
+		if (!strcmp(arg, "b") || !strcmp(arg, "B")) {
+			use_plane_b = 1;
+		} else if (!strcmp(arg, "a") || !strcmp(arg, "A")) {
+			use_plane_b = 0;
+		} else {
+			filename = arg;
+		}
+	}
+
+	uint32_t nt_base = use_plane_b ? vdp_get_plane_b_base(vdp) : vdp_get_plane_a_base(vdp);
+	uint32_t stride = vdp_get_nametable_stride(vdp);
+	uint32_t width_tiles, height_tiles;
+	vdp_get_visible_dimensions(vdp, &width_tiles, &height_tiles);
+
+	FILE *f = fopen(filename, "w");
+	if (!f) {
+		fprintf(stderr, "Failed to open %s for writing\n", filename);
+		return 1;
+	}
+
+	// Track embedded tiles (tiles not found in ROM and not blank)
+	// Use a simple array; max tiles = 40*30 = 1200
+	uint32_t total_tiles = width_tiles * height_tiles;
+	uint32_t *embed_vram_addrs = calloc(total_tiles, sizeof(uint32_t));
+	uint8_t *embed_flags = calloc(total_tiles, sizeof(uint8_t));
+	uint32_t embed_count = 0;
+
+	// Build tile map entries in memory
+	typedef struct {
+		uint32_t row, col;
+		uint32_t pattern;
+		uint32_t palette_line;
+		int h_flip, v_flip, priority;
+		uint32_t rom_offset;
+		int has_rom_offset;
+		const char *source;  // "dma", "search", "embedded", "blank"
+	} tile_entry;
+
+	tile_entry *entries = calloc(total_tiles, sizeof(tile_entry));
+
+	uint32_t rom_size = gen->header.info.rom_size;
+
+	for (uint32_t row = 0; row < height_tiles; row++) {
+		for (uint32_t col = 0; col < width_tiles; col++) {
+			uint32_t idx = row * width_tiles + col;
+			uint32_t nt_addr = nt_base + (row * stride + col) * 2;
+			uint16_t entry = (vdp->vdpmem[nt_addr] << 8) | vdp->vdpmem[nt_addr + 1];
+
+			uint32_t pattern = entry & 0x7FF;
+			int h_flip = (entry >> 11) & 1;
+			int v_flip = (entry >> 12) & 1;
+			uint32_t pal_line = (entry >> 13) & 3;
+			int priority = (entry >> 15) & 1;
+
+			uint32_t vram_addr = pattern * 32;
+			uint8_t *tile_data = &vdp->vdpmem[vram_addr];
+
+			entries[idx].row = row;
+			entries[idx].col = col;
+			entries[idx].pattern = pattern;
+			entries[idx].palette_line = pal_line;
+			entries[idx].h_flip = h_flip;
+			entries[idx].v_flip = v_flip;
+			entries[idx].priority = priority;
+
+			if (is_tile_blank(tile_data)) {
+				entries[idx].source = "blank";
+				entries[idx].has_rom_offset = 0;
+			} else {
+				// Try DMA history first
+				uint32_t src_addr;
+				if (vdp_dma_lookup_source(vdp, vram_addr, &src_addr) && src_addr < rom_size) {
+					entries[idx].source = "dma";
+					entries[idx].rom_offset = src_addr;
+					entries[idx].has_rom_offset = 1;
+				} else if (vdp_find_tile_in_rom(tile_data, gen->cart, rom_size, &src_addr)) {
+					entries[idx].source = "search";
+					entries[idx].rom_offset = src_addr;
+					entries[idx].has_rom_offset = 1;
+				} else {
+					entries[idx].source = "embedded";
+					entries[idx].has_rom_offset = 0;
+					embed_vram_addrs[embed_count] = vram_addr;
+					embed_flags[embed_count] = 1;
+					embed_count++;
+				}
+			}
+		}
+	}
+
+	// Write JSON
+	fprintf(f, "{\n");
+	fprintf(f, "  \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
+	fprintf(f, "  \"screen_captures\": [\n");
+	fprintf(f, "    {\n");
+	fprintf(f, "      \"name\": \"capture_frame_%u\",\n", vdp->frame);
+	fprintf(f, "      \"plane\": \"%s\",\n", use_plane_b ? "B" : "A");
+	fprintf(f, "      \"width_tiles\": %u,\n", width_tiles);
+	fprintf(f, "      \"height_tiles\": %u,\n", height_tiles);
+
+	// Palettes
+	fprintf(f, "      \"palettes\": [\n");
+	for (int line = 0; line < 4; line++) {
+		fprintf(f, "        {\n");
+		fprintf(f, "          \"line\": %d,\n", line);
+		fprintf(f, "          \"cram_values\": [");
+		for (int c = 0; c < 16; c++) {
+			if (c) fprintf(f, ", ");
+			fprintf(f, "\"0%03X\"", vdp->cram[line * 16 + c] & 0xFFF);
+		}
+		fprintf(f, "],\n");
+		// Look up DMA source for this palette line
+		uint32_t cram_src;
+		if (vdp_dma_lookup_cram_source(vdp, line * 32, 32, &cram_src)) {
+			fprintf(f, "          \"dma_source\": \"0x%X\"\n", cram_src);
+		} else {
+			fprintf(f, "          \"dma_source\": null\n");
+		}
+		fprintf(f, "        }%s\n", line < 3 ? "," : "");
+	}
+	fprintf(f, "      ],\n");
+
+	// Tile map
+	fprintf(f, "      \"tile_map\": [\n");
+	for (uint32_t i = 0; i < total_tiles; i++) {
+		tile_entry *e = &entries[i];
+		fprintf(f, "        {");
+		fprintf(f, "\"row\": %u, \"col\": %u, ", e->row, e->col);
+		fprintf(f, "\"pattern\": %u, ", e->pattern);
+		fprintf(f, "\"palette_line\": %u, ", e->palette_line);
+		fprintf(f, "\"h_flip\": %s, ", e->h_flip ? "true" : "false");
+		fprintf(f, "\"v_flip\": %s, ", e->v_flip ? "true" : "false");
+		fprintf(f, "\"priority\": %s, ", e->priority ? "true" : "false");
+		if (e->has_rom_offset) {
+			fprintf(f, "\"rom_offset\": \"0x%X\", ", e->rom_offset);
+		} else {
+			fprintf(f, "\"rom_offset\": null, ");
+		}
+		fprintf(f, "\"source\": \"%s\"", e->source);
+		fprintf(f, "}%s\n", i < total_tiles - 1 ? "," : "");
+	}
+	fprintf(f, "      ],\n");
+
+	// Embedded tiles
+	fprintf(f, "      \"embedded_tiles\": {");
+	int first_embed = 1;
+	for (uint32_t i = 0; i < embed_count; i++) {
+		uint32_t vaddr = embed_vram_addrs[i];
+		if (!first_embed) fprintf(f, ",");
+		fprintf(f, "\n        \"0x%X\": \"", vaddr);
+		for (int b = 0; b < 32; b++) {
+			json_write_hex_byte(f, vdp->vdpmem[vaddr + b]);
+		}
+		fprintf(f, "\"");
+		first_embed = 0;
+	}
+	if (embed_count) fprintf(f, "\n      ");
+	fprintf(f, "}\n");
+
+	fprintf(f, "    }\n");
+	fprintf(f, "  ]\n");
+	fprintf(f, "}\n");
+
+	fclose(f);
+	free(entries);
+	free(embed_vram_addrs);
+	free(embed_flags);
+
+	printf("Screen capture written to %s (%u×%u tiles, plane %s, %u embedded)\n",
+		filename, width_tiles, height_tiles, use_plane_b ? "B" : "A", embed_count);
+	return 1;
+}
+
 command_def genesis_commands[] = {
 	{
 		.names = (const char *[]){
@@ -4502,6 +4701,17 @@ command_def genesis_commands[] = {
 		.impl = cmd_ym_timer,
 		.min_args = 0,
 		.max_args = 0
+	},
+	{
+		.names = (const char *[]){
+			"screencap", "scap", NULL
+		},
+		.usage = "screencap [FILE] [a|b]",
+		.desc = "Capture full screen tile map to JSON file for sprite editor",
+		.impl = cmd_screencap,
+		.min_args = 0,
+		.max_args = 2,
+		.raw_args = 1
 	}
 };
 

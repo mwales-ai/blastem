@@ -362,6 +362,12 @@ int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *ro
 int vdp_dma_lookup_cram_source(vdp_context *context, uint32_t cram_byte_addr, uint32_t cram_size, uint32_t *src_addr_out);
 extern uint32_t dma_history_config_size;
 
+uint32_t vdp_get_plane_a_base(vdp_context *context);
+uint32_t vdp_get_plane_b_base(vdp_context *context);
+uint32_t vdp_get_nametable_stride(vdp_context *context);
+void vdp_get_visible_dimensions(vdp_context *context, uint32_t *width_tiles, uint32_t *height_tiles);
+int vdp_find_tile_in_rom(uint8_t *vram_tile, uint16_t *cart, uint32_t rom_size, uint32_t *rom_offset_out);
+
 extern uint16_t mode4_address_map[0x4000];
 
 #endif //VDP_H_
