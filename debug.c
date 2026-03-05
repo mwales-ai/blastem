@@ -4443,6 +4443,208 @@ static void json_write_hex_byte(FILE *f, uint8_t b)
 	fputc(hex[b & 0xF], f);
 }
 
+static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+	vdp_context *vdp = gen->vdp;
+
+	if (!(vdp->regs[REG_MODE_2] & BIT_MODE_5)) {
+		fprintf(stderr, "spritecap: only Mode 5 (Genesis) is supported\n");
+		return 1;
+	}
+
+	// Parse filename from raw args
+	static char filename_buf[512];
+	const char *filename = "spritecap.json";
+	if (cmd->raw && cmd->raw[0]) {
+		char *cur = cmd->raw;
+		while (*cur && isspace(*cur)) cur++;
+		if (*cur) {
+			char *start = cur;
+			while (*cur && !isspace(*cur)) cur++;
+			int len = cur - start;
+			if (len > 0 && len < (int)sizeof(filename_buf)) {
+				memcpy(filename_buf, start, len);
+				filename_buf[len] = '\0';
+				filename = filename_buf;
+			}
+		}
+	}
+
+	// Walk the sprite attribute table link list
+	// Inline SAT address calculation (mode5_sat_address is static in vdp.c)
+	uint32_t sat_address = vdp->regs[REG_SAT] << 9;
+	if (!(vdp->regs[REG_MODE_2] & BIT_128K_VRAM)) {
+		sat_address &= 0xFFFF;
+	}
+	if (vdp->regs[REG_MODE_4] & BIT_H40) {
+		sat_address &= 0x1FC00;
+	}
+	uint32_t rom_size = gen->header.info.rom_size;
+	uint8_t max_sprites = (vdp->regs[REG_MODE_4] & BIT_H40) ? 80 : 64;
+
+	// Collect sprites into a local array
+	typedef struct {
+		int16_t  x, y;
+		uint8_t  width_tiles, height_tiles;
+		uint8_t  pal, priority, h_flip, v_flip;
+		uint16_t pattern;
+		uint16_t vram_addr;
+		uint8_t  index;
+	} cap_sprite;
+
+	cap_sprite sprites[MAX_SPRITES_FRAME];
+	int sprite_count = 0;
+	uint16_t current_index = 0;
+	uint8_t visited = 0;
+
+	do {
+		uint16_t address = current_index * 8 + sat_address;
+		uint16_t cache_address = current_index * 4;
+		uint8_t height_tiles = (vdp->sat_cache[cache_address + 2] & 0x3) + 1;
+		uint8_t width_tiles = ((vdp->sat_cache[cache_address + 2] >> 2) & 0x3) + 1;
+		int16_t y = ((vdp->sat_cache[cache_address] & 0x3) << 8 | vdp->sat_cache[cache_address + 1]) & 0x1FF;
+		int16_t x = ((vdp->vdpmem[address + 6] & 0x3) << 8 | vdp->vdpmem[address + 7]) & 0x1FF;
+		uint16_t link = vdp->sat_cache[cache_address + 3] & 0x7F;
+		uint16_t tileinfo = (vdp->vdpmem[address + 4] << 8) | vdp->vdpmem[address + 5];
+
+		// Only capture sprites that are on screen (y != 0 means visible)
+		if (y != 0) {
+			cap_sprite *s = &sprites[sprite_count];
+			s->index = current_index;
+			s->x = x - 128;
+			s->y = y - 128;
+			s->width_tiles = width_tiles;
+			s->height_tiles = height_tiles;
+			s->pattern = tileinfo & 0x7FF;
+			s->vram_addr = (tileinfo & 0x7FF) << 5;
+			s->pal = (tileinfo >> 13) & 3;
+			s->priority = (tileinfo >> 15) & 1;
+			s->h_flip = (tileinfo >> 11) & 1;
+			s->v_flip = (tileinfo >> 12) & 1;
+			sprite_count++;
+		}
+
+		current_index = link;
+		visited++;
+	} while (current_index != 0 && visited < max_sprites);
+
+	if (sprite_count == 0) {
+		printf("No visible sprites found.\n");
+		return 1;
+	}
+
+	// Calculate bounding box for the collection
+	int16_t min_x = 32767, min_y = 32767, max_x = -32768, max_y = -32768;
+	for (int i = 0; i < sprite_count; i++) {
+		cap_sprite *s = &sprites[i];
+		if (s->x < min_x) min_x = s->x;
+		if (s->y < min_y) min_y = s->y;
+		int16_t right = s->x + s->width_tiles * 8;
+		int16_t bottom = s->y + s->height_tiles * 8;
+		if (right > max_x) max_x = right;
+		if (bottom > max_y) max_y = bottom;
+	}
+
+	FILE *f = fopen(filename, "w");
+	if (!f) {
+		fprintf(stderr, "Failed to open %s for writing\n", filename);
+		return 1;
+	}
+
+	fprintf(f, "{\n");
+	fprintf(f, "  \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
+	fprintf(f, "  \"sprite_collections\": [\n");
+	fprintf(f, "    {\n");
+	fprintf(f, "      \"name\": \"capture_frame_%u\",\n", vdp->frame);
+	fprintf(f, "      \"bounding_box\": {\"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d},\n",
+		min_x, min_y, max_x - min_x, max_y - min_y);
+
+	// Palettes — include all 4 CRAM lines
+	fprintf(f, "      \"palettes\": [\n");
+	for (int line = 0; line < 4; line++) {
+		fprintf(f, "        {\n");
+		fprintf(f, "          \"line\": %d,\n", line);
+		fprintf(f, "          \"cram_values\": [");
+		for (int c = 0; c < 16; c++) {
+			if (c) fprintf(f, ", ");
+			fprintf(f, "\"0%03X\"", vdp->cram[line * 16 + c] & 0xFFF);
+		}
+		fprintf(f, "],\n");
+		uint32_t cram_src;
+		if (vdp_dma_lookup_cram_source(vdp, line * 32, 32, &cram_src)) {
+			fprintf(f, "          \"dma_source\": \"0x%X\"\n", cram_src);
+		} else {
+			fprintf(f, "          \"dma_source\": null\n");
+		}
+		fprintf(f, "        }%s\n", line < 3 ? "," : "");
+	}
+	fprintf(f, "      ],\n");
+
+	// Sprites array
+	fprintf(f, "      \"sprites\": [\n");
+	int embedded_count = 0;
+	for (int i = 0; i < sprite_count; i++) {
+		cap_sprite *s = &sprites[i];
+		int total_tiles = s->width_tiles * s->height_tiles;
+
+		fprintf(f, "        {\n");
+		fprintf(f, "          \"index\": %d,\n", s->index);
+		fprintf(f, "          \"x\": %d,\n", s->x);
+		fprintf(f, "          \"y\": %d,\n", s->y);
+		fprintf(f, "          \"width_tiles\": %d,\n", s->width_tiles);
+		fprintf(f, "          \"height_tiles\": %d,\n", s->height_tiles);
+		fprintf(f, "          \"palette_line\": %d,\n", s->pal);
+		fprintf(f, "          \"priority\": %s,\n", s->priority ? "true" : "false");
+		fprintf(f, "          \"h_flip\": %s,\n", s->h_flip ? "true" : "false");
+		fprintf(f, "          \"v_flip\": %s,\n", s->v_flip ? "true" : "false");
+		fprintf(f, "          \"pattern\": %d,\n", s->pattern);
+		fprintf(f, "          \"vram_addr\": \"0x%04X\",\n", s->vram_addr);
+
+		// Look up DMA source for the tile data
+		uint32_t dma_src;
+		if (vdp_dma_lookup_source(vdp, s->vram_addr, &dma_src) && dma_src < rom_size) {
+			fprintf(f, "          \"rom_offset\": \"0x%X\",\n", dma_src);
+			fprintf(f, "          \"source\": \"dma\"\n");
+		} else {
+			// Try brute-force ROM search with first tile
+			uint8_t *tile_data = &vdp->vdpmem[s->vram_addr];
+			uint32_t search_addr;
+			if (!is_tile_blank(tile_data) && vdp_find_tile_in_rom(tile_data, gen->cart, rom_size, &search_addr)) {
+				fprintf(f, "          \"rom_offset\": \"0x%X\",\n", search_addr);
+				fprintf(f, "          \"source\": \"search\"\n");
+			} else {
+				// Embed tile data
+				fprintf(f, "          \"rom_offset\": null,\n");
+				fprintf(f, "          \"source\": \"embedded\",\n");
+				fprintf(f, "          \"tile_data\": \"");
+				for (int t = 0; t < total_tiles; t++) {
+					// Genesis sprite tiles are in column-major order
+					uint16_t tile_vram = s->vram_addr + t * 32;
+					for (int b = 0; b < 32; b++) {
+						json_write_hex_byte(f, vdp->vdpmem[tile_vram + b]);
+					}
+				}
+				fprintf(f, "\"\n");
+				embedded_count++;
+			}
+		}
+
+		fprintf(f, "        }%s\n", i < sprite_count - 1 ? "," : "");
+	}
+	fprintf(f, "      ]\n");
+
+	fprintf(f, "    }\n");
+	fprintf(f, "  ]\n");
+	fprintf(f, "}\n");
+
+	fclose(f);
+	printf("Sprite collection written to %s (%d sprites, %d embedded, bounding box %dx%d)\n",
+		filename, sprite_count, embedded_count, max_x - min_x, max_y - min_y);
+	return 1;
+}
+
 static uint8_t cmd_screencap(debug_root *root, parsed_command *cmd)
 {
 	m68k_context *m68k = root->cpu_context;
@@ -4722,6 +4924,17 @@ command_def genesis_commands[] = {
 		.impl = cmd_screencap,
 		.min_args = 0,
 		.max_args = 2,
+		.raw_args = 1
+	},
+	{
+		.names = (const char *[]){
+			"spritecap", "spc", NULL
+		},
+		.usage = "spritecap [FILE]",
+		.desc = "Capture all visible sprites to JSON file for sprite editor",
+		.impl = cmd_spritecap,
+		.min_args = 0,
+		.max_args = 1,
 		.raw_args = 1
 	}
 };
