@@ -3739,8 +3739,8 @@ static uint8_t cmd_dma_trace(debug_root *root, parsed_command *cmd)
 	genesis_context *gen = m68k->system;
 	vdp_context *vdp = gen->vdp;
 
-	if (cmd->num_args) {
-		char *arg = cmd->args[0].raw;
+	if (cmd->raw && cmd->raw[0]) {
+		char *arg = cmd->raw;
 		if (!strcmp(arg, "off")) {
 			vdp->dma_hook = NULL;
 			if (vdp->dma_log_file && vdp->dma_log_file != stderr) {
@@ -4449,17 +4449,28 @@ static uint8_t cmd_screencap(debug_root *root, parsed_command *cmd)
 	genesis_context *gen = m68k->system;
 	vdp_context *vdp = gen->vdp;
 
-	// Determine output file and plane
+	// Determine output file and plane from raw arg string.
+	// raw_args=1 means cmd->raw has the entire argument string, cmd->num_args is 0.
+	static char filename_buf[512];
 	const char *filename = "screencap.json";
 	int use_plane_b = 0;
-	for (int i = 0; i < cmd->num_args; i++) {
-		char *arg = cmd->args[i].raw;
-		if (!strcmp(arg, "b") || !strcmp(arg, "B")) {
-			use_plane_b = 1;
-		} else if (!strcmp(arg, "a") || !strcmp(arg, "A")) {
-			use_plane_b = 0;
-		} else {
-			filename = arg;
+	if (cmd->raw && cmd->raw[0]) {
+		char *cur = cmd->raw;
+		while (*cur) {
+			while (*cur && isspace(*cur)) cur++;
+			if (!*cur) break;
+			char *start = cur;
+			while (*cur && !isspace(*cur)) cur++;
+			int len = cur - start;
+			if (len == 1 && (start[0] == 'b' || start[0] == 'B')) {
+				use_plane_b = 1;
+			} else if (len == 1 && (start[0] == 'a' || start[0] == 'A')) {
+				use_plane_b = 0;
+			} else if (len > 0 && len < (int)sizeof(filename_buf)) {
+				memcpy(filename_buf, start, len);
+				filename_buf[len] = '\0';
+				filename = filename_buf;
+			}
 		}
 	}
 
