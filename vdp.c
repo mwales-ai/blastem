@@ -2353,6 +2353,9 @@ static void vdp_advance_line(vdp_context *context)
 	context->vcounter++;
 	if (context->renderer && context->vcounter == context->inactive_start) {
 		context->frame++;
+		if (context->frame_hook) {
+			context->frame_hook(context);
+		}
 	}
 	if (is_mode_5) {
 		context->window_h_latch = context->regs[REG_WINDOW_H];
@@ -3222,6 +3225,9 @@ static void advance_output_line(vdp_context *context)
 		vdp_update_per_frame_debug(context);
 		context->h40_lines = 0;
 		context->frame++;
+		if (context->frame_hook) {
+			context->frame_hook(context);
+		}
 		context->output_lines = 0;
 	}
 

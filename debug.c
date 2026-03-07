@@ -4443,6 +4443,274 @@ static void json_write_hex_byte(FILE *f, uint8_t b)
 	fputc(hex[b & 0xF], f);
 }
 
+static int capture_sprites_to_array(vdp_context *vdp, cap_sprite *out, int max_sprites)
+{
+	uint32_t sat_address = vdp->regs[REG_SAT] << 9;
+	if (!(vdp->regs[REG_MODE_2] & BIT_128K_VRAM)) {
+		sat_address &= 0xFFFF;
+	}
+	if (vdp->regs[REG_MODE_4] & BIT_H40) {
+		sat_address &= 0x1FC00;
+	}
+	uint8_t link_limit = (vdp->regs[REG_MODE_4] & BIT_H40) ? 80 : 64;
+	int count = 0;
+	uint16_t current_index = 0;
+	uint8_t visited = 0;
+
+	do {
+		uint16_t address = current_index * 8 + sat_address;
+		uint16_t cache_address = current_index * 4;
+		uint8_t height_tiles = (vdp->sat_cache[cache_address + 2] & 0x3) + 1;
+		uint8_t width_tiles = ((vdp->sat_cache[cache_address + 2] >> 2) & 0x3) + 1;
+		int16_t y = ((vdp->sat_cache[cache_address] & 0x3) << 8 | vdp->sat_cache[cache_address + 1]) & 0x1FF;
+		int16_t x = ((vdp->vdpmem[address + 6] & 0x3) << 8 | vdp->vdpmem[address + 7]) & 0x1FF;
+		uint16_t link = vdp->sat_cache[cache_address + 3] & 0x7F;
+		uint16_t tileinfo = (vdp->vdpmem[address + 4] << 8) | vdp->vdpmem[address + 5];
+
+		if (y != 0 && count < max_sprites) {
+			cap_sprite *s = &out[count];
+			s->index = current_index;
+			s->x = x - 128;
+			s->y = y - 128;
+			s->width_tiles = width_tiles;
+			s->height_tiles = height_tiles;
+			s->pattern = tileinfo & 0x7FF;
+			s->vram_addr = (tileinfo & 0x7FF) << 5;
+			s->pal = (tileinfo >> 13) & 3;
+			s->priority = (tileinfo >> 15) & 1;
+			s->h_flip = (tileinfo >> 11) & 1;
+			s->v_flip = (tileinfo >> 12) & 1;
+			count++;
+		}
+
+		current_index = link;
+		visited++;
+	} while (current_index != 0 && visited < link_limit);
+
+	return count;
+}
+
+static void write_sprite_json_frame(FILE *f, vdp_context *vdp, genesis_context *gen,
+	cap_sprite *sprites, int count, uint32_t frame_number, int need_comma)
+{
+	uint32_t rom_size = gen->header.info.rom_size;
+
+	// Bounding box
+	int16_t min_x = 32767, min_y = 32767, max_x = -32768, max_y = -32768;
+	for (int i = 0; i < count; i++) {
+		cap_sprite *s = &sprites[i];
+		if (s->x < min_x) min_x = s->x;
+		if (s->y < min_y) min_y = s->y;
+		int16_t right = s->x + s->width_tiles * 8;
+		int16_t bottom = s->y + s->height_tiles * 8;
+		if (right > max_x) max_x = right;
+		if (bottom > max_y) max_y = bottom;
+	}
+
+	if (need_comma) fprintf(f, ",\n");
+	fprintf(f, "    {\n");
+	fprintf(f, "      \"frame\": %u,\n", frame_number);
+	fprintf(f, "      \"bounding_box\": {\"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d},\n",
+		min_x, min_y, max_x - min_x, max_y - min_y);
+	fprintf(f, "      \"sprites\": [\n");
+
+	for (int i = 0; i < count; i++) {
+		cap_sprite *s = &sprites[i];
+		int total_tiles = s->width_tiles * s->height_tiles;
+
+		fprintf(f, "        {\n");
+		fprintf(f, "          \"index\": %d,\n", s->index);
+		fprintf(f, "          \"x\": %d,\n", s->x);
+		fprintf(f, "          \"y\": %d,\n", s->y);
+		fprintf(f, "          \"width_tiles\": %d,\n", s->width_tiles);
+		fprintf(f, "          \"height_tiles\": %d,\n", s->height_tiles);
+		fprintf(f, "          \"palette_line\": %d,\n", s->pal);
+		fprintf(f, "          \"priority\": %s,\n", s->priority ? "true" : "false");
+		fprintf(f, "          \"h_flip\": %s,\n", s->h_flip ? "true" : "false");
+		fprintf(f, "          \"v_flip\": %s,\n", s->v_flip ? "true" : "false");
+		fprintf(f, "          \"pattern\": %d,\n", s->pattern);
+		fprintf(f, "          \"vram_addr\": \"0x%04X\",\n", s->vram_addr);
+
+		uint32_t dma_src;
+		if (vdp_dma_lookup_source(vdp, s->vram_addr, &dma_src) && dma_src < rom_size) {
+			fprintf(f, "          \"rom_offset\": \"0x%X\",\n", dma_src);
+			fprintf(f, "          \"source\": \"dma\"\n");
+		} else {
+			uint8_t *tile_data = &vdp->vdpmem[s->vram_addr];
+			uint32_t search_addr;
+			if (!is_tile_blank(tile_data) && vdp_find_tile_in_rom(tile_data, gen->cart, rom_size, &search_addr)) {
+				fprintf(f, "          \"rom_offset\": \"0x%X\",\n", search_addr);
+				fprintf(f, "          \"source\": \"search\"\n");
+			} else {
+				fprintf(f, "          \"rom_offset\": null,\n");
+				fprintf(f, "          \"source\": \"embedded\",\n");
+				fprintf(f, "          \"tile_data\": \"");
+				for (int t = 0; t < total_tiles; t++) {
+					uint16_t tile_vram = s->vram_addr + t * 32;
+					for (int b = 0; b < 32; b++) {
+						json_write_hex_byte(f, vdp->vdpmem[tile_vram + b]);
+					}
+				}
+				fprintf(f, "\"\n");
+			}
+		}
+
+		fprintf(f, "        }%s\n", i < count - 1 ? "," : "");
+	}
+	fprintf(f, "      ]\n");
+	fprintf(f, "    }");
+}
+
+static void on_sprite_frame(vdp_context *vdp)
+{
+	if (!vdp->sprite_rec_active) return;
+
+	genesis_context *gen = (genesis_context *)vdp->system;
+
+	cap_sprite sprites[MAX_SPRITES_FRAME];
+	int count = capture_sprites_to_array(vdp, sprites, MAX_SPRITES_FRAME);
+
+	// Compare with previous frame
+	if (count == (int)vdp->sprite_rec_prev_count &&
+		count > 0 &&
+		memcmp(sprites, vdp->sprite_rec_prev, count * sizeof(cap_sprite)) == 0)
+	{
+		// Identical frame, skip
+		vdp->sprite_rec_total_frames++;
+		return;
+	}
+
+	// Write unique frame
+	write_sprite_json_frame(vdp->sprite_rec_file, vdp, gen,
+		sprites, count, vdp->frame, !vdp->sprite_rec_first);
+	fflush(vdp->sprite_rec_file);
+
+	// Save as previous
+	if (count > 0) {
+		memcpy(vdp->sprite_rec_prev, sprites, count * sizeof(cap_sprite));
+	}
+	vdp->sprite_rec_prev_count = count;
+	vdp->sprite_rec_first = 0;
+	vdp->sprite_rec_unique_frames++;
+	vdp->sprite_rec_total_frames++;
+
+	if (vdp->sprite_rec_unique_frames % 60 == 0) {
+		printf("Sprite recording: %u unique frames captured (%u total)\n",
+			vdp->sprite_rec_unique_frames, vdp->sprite_rec_total_frames);
+	}
+}
+
+static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+	vdp_context *vdp = gen->vdp;
+
+	if (vdp->sprite_rec_active) {
+		fprintf(stderr, "Sprite recording already in progress. Use spriterecordstop first.\n");
+		return 1;
+	}
+
+	if (!(vdp->regs[REG_MODE_2] & BIT_MODE_5)) {
+		fprintf(stderr, "spriterecord: only Mode 5 (Genesis) is supported\n");
+		return 1;
+	}
+
+	// Parse filename
+	static char filename_buf[512];
+	const char *filename = "spriterecord.json";
+	if (cmd->raw && cmd->raw[0]) {
+		char *cur = cmd->raw;
+		while (*cur && isspace(*cur)) cur++;
+		if (*cur) {
+			char *start = cur;
+			while (*cur && !isspace(*cur)) cur++;
+			int len = cur - start;
+			if (len > 0 && len < (int)sizeof(filename_buf)) {
+				memcpy(filename_buf, start, len);
+				filename_buf[len] = '\0';
+				filename = filename_buf;
+			}
+		}
+	}
+
+	FILE *f = fopen(filename, "w");
+	if (!f) {
+		fprintf(stderr, "Failed to open %s for writing\n", filename);
+		return 1;
+	}
+
+	// Write JSON header
+	fprintf(f, "{\n");
+	fprintf(f, "  \"sprite_animation\": {\n");
+	fprintf(f, "    \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
+
+	// Write palettes
+	fprintf(f, "    \"palettes\": [\n");
+	for (int line = 0; line < 4; line++) {
+		fprintf(f, "      {\n");
+		fprintf(f, "        \"line\": %d,\n", line);
+		fprintf(f, "        \"cram_values\": [");
+		for (int c = 0; c < 16; c++) {
+			if (c) fprintf(f, ", ");
+			fprintf(f, "\"0%03X\"", vdp->cram[line * 16 + c] & 0xFFF);
+		}
+		fprintf(f, "],\n");
+		uint32_t cram_src;
+		if (vdp_dma_lookup_cram_source(vdp, line * 32, 32, &cram_src)) {
+			fprintf(f, "        \"dma_source\": \"0x%X\"\n", cram_src);
+		} else {
+			fprintf(f, "        \"dma_source\": null\n");
+		}
+		fprintf(f, "      }%s\n", line < 3 ? "," : "");
+	}
+	fprintf(f, "    ],\n");
+	fprintf(f, "    \"frames\": [\n");
+	fflush(f);
+
+	// Allocate previous frame buffer
+	vdp->sprite_rec_prev = calloc(MAX_SPRITES_FRAME, sizeof(cap_sprite));
+	vdp->sprite_rec_prev_count = 0;
+	vdp->sprite_rec_file = f;
+	vdp->sprite_rec_active = 1;
+	vdp->sprite_rec_first = 1;
+	vdp->sprite_rec_unique_frames = 0;
+	vdp->sprite_rec_total_frames = 0;
+	vdp->frame_hook = on_sprite_frame;
+
+	printf("Sprite recording started → %s (resume emulation, then use spriterecordstop)\n", filename);
+	return 0; // resume execution
+}
+
+static uint8_t cmd_spriterecordstop(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+	vdp_context *vdp = gen->vdp;
+
+	if (!vdp->sprite_rec_active) {
+		fprintf(stderr, "No sprite recording in progress.\n");
+		return 1;
+	}
+
+	// Write JSON footer
+	fprintf(vdp->sprite_rec_file, "\n    ]\n");
+	fprintf(vdp->sprite_rec_file, "  }\n");
+	fprintf(vdp->sprite_rec_file, "}\n");
+	fclose(vdp->sprite_rec_file);
+
+	printf("Sprite recording stopped: %u unique frames out of %u total\n",
+		vdp->sprite_rec_unique_frames, vdp->sprite_rec_total_frames);
+
+	free(vdp->sprite_rec_prev);
+	vdp->sprite_rec_prev = NULL;
+	vdp->sprite_rec_file = NULL;
+	vdp->sprite_rec_active = 0;
+	vdp->frame_hook = NULL;
+
+	return 1;
+}
+
 static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 {
 	m68k_context *m68k = root->cpu_context;
@@ -4472,63 +4740,10 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 		}
 	}
 
-	// Walk the sprite attribute table link list
-	// Inline SAT address calculation (mode5_sat_address is static in vdp.c)
-	uint32_t sat_address = vdp->regs[REG_SAT] << 9;
-	if (!(vdp->regs[REG_MODE_2] & BIT_128K_VRAM)) {
-		sat_address &= 0xFFFF;
-	}
-	if (vdp->regs[REG_MODE_4] & BIT_H40) {
-		sat_address &= 0x1FC00;
-	}
 	uint32_t rom_size = gen->header.info.rom_size;
-	uint8_t max_sprites = (vdp->regs[REG_MODE_4] & BIT_H40) ? 80 : 64;
-
-	// Collect sprites into a local array
-	typedef struct {
-		int16_t  x, y;
-		uint8_t  width_tiles, height_tiles;
-		uint8_t  pal, priority, h_flip, v_flip;
-		uint16_t pattern;
-		uint16_t vram_addr;
-		uint8_t  index;
-	} cap_sprite;
 
 	cap_sprite sprites[MAX_SPRITES_FRAME];
-	int sprite_count = 0;
-	uint16_t current_index = 0;
-	uint8_t visited = 0;
-
-	do {
-		uint16_t address = current_index * 8 + sat_address;
-		uint16_t cache_address = current_index * 4;
-		uint8_t height_tiles = (vdp->sat_cache[cache_address + 2] & 0x3) + 1;
-		uint8_t width_tiles = ((vdp->sat_cache[cache_address + 2] >> 2) & 0x3) + 1;
-		int16_t y = ((vdp->sat_cache[cache_address] & 0x3) << 8 | vdp->sat_cache[cache_address + 1]) & 0x1FF;
-		int16_t x = ((vdp->vdpmem[address + 6] & 0x3) << 8 | vdp->vdpmem[address + 7]) & 0x1FF;
-		uint16_t link = vdp->sat_cache[cache_address + 3] & 0x7F;
-		uint16_t tileinfo = (vdp->vdpmem[address + 4] << 8) | vdp->vdpmem[address + 5];
-
-		// Only capture sprites that are on screen (y != 0 means visible)
-		if (y != 0) {
-			cap_sprite *s = &sprites[sprite_count];
-			s->index = current_index;
-			s->x = x - 128;
-			s->y = y - 128;
-			s->width_tiles = width_tiles;
-			s->height_tiles = height_tiles;
-			s->pattern = tileinfo & 0x7FF;
-			s->vram_addr = (tileinfo & 0x7FF) << 5;
-			s->pal = (tileinfo >> 13) & 3;
-			s->priority = (tileinfo >> 15) & 1;
-			s->h_flip = (tileinfo >> 11) & 1;
-			s->v_flip = (tileinfo >> 12) & 1;
-			sprite_count++;
-		}
-
-		current_index = link;
-		visited++;
-	} while (current_index != 0 && visited < max_sprites);
+	int sprite_count = capture_sprites_to_array(vdp, sprites, MAX_SPRITES_FRAME);
 
 	if (sprite_count == 0) {
 		printf("No visible sprites found.\n");
@@ -4936,6 +5151,27 @@ command_def genesis_commands[] = {
 		.min_args = 0,
 		.max_args = 1,
 		.raw_args = 1
+	},
+	{
+		.names = (const char *[]){
+			"spriterecord", "sprec", NULL
+		},
+		.usage = "spriterecord [FILE]",
+		.desc = "Start recording sprites every frame to JSON (skip duplicate frames)",
+		.impl = cmd_spriterecord,
+		.min_args = 0,
+		.max_args = 1,
+		.raw_args = 1
+	},
+	{
+		.names = (const char *[]){
+			"spriterecordstop", "sprecstop", NULL
+		},
+		.usage = "spriterecordstop",
+		.desc = "Stop sprite recording and close the JSON file",
+		.impl = cmd_spriterecordstop,
+		.min_args = 0,
+		.max_args = 0
 	}
 };
 

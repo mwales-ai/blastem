@@ -199,6 +199,15 @@ enum {
 	VDP_TMS9918A
 };
 
+typedef struct {
+	int16_t  x, y;
+	uint8_t  width_tiles, height_tiles;
+	uint8_t  pal, priority, h_flip, v_flip;
+	uint16_t pattern;
+	uint16_t vram_addr;
+	uint8_t  index;
+} cap_sprite;
+
 typedef void (*vdp_hook)(vdp_context *);
 typedef void (*vdp_reg_hook)(vdp_context *, uint16_t reg, uint16_t value);
 typedef void (*vdp_data_hook)(vdp_context *, uint16_t value);
@@ -214,10 +223,18 @@ struct vdp_context {
 	pixel_t        *debug_fbs[NUM_DEBUG_TYPES];
 	char           *kmod_msg_buffer;
 	vdp_hook       dma_hook;
+	vdp_hook       frame_hook;
 	vdp_reg_hook   reg_hook;
 	vdp_data_hook  data_hook;
 	FILE           *dma_log_file;
 	uint8_t        dma_log_active;
+	FILE           *sprite_rec_file;
+	cap_sprite     *sprite_rec_prev;
+	uint32_t       sprite_rec_prev_count;
+	uint32_t       sprite_rec_unique_frames;
+	uint32_t       sprite_rec_total_frames;
+	uint8_t        sprite_rec_active;
+	uint8_t        sprite_rec_first;
 	dma_history_entry  *dma_history;
 	uint32_t           dma_history_size;
 	uint32_t           dma_history_idx;
