@@ -4618,7 +4618,7 @@ static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
 
 	// Parse filename
 	static char filename_buf[512];
-	const char *filename = "spriterecord.json";
+	const char *filename = "spriterecord.sprec";
 	if (cmd->raw && cmd->raw[0]) {
 		char *cur = cmd->raw;
 		while (*cur && isspace(*cur)) cur++;
@@ -4642,15 +4642,14 @@ static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
 
 	// Write JSON header
 	fprintf(f, "{\n");
-	fprintf(f, "  \"sprite_animation\": {\n");
-	fprintf(f, "    \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
+	fprintf(f, "  \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
 
 	// Write palettes
-	fprintf(f, "    \"palettes\": [\n");
+	fprintf(f, "  \"palettes\": [\n");
 	for (int line = 0; line < 4; line++) {
-		fprintf(f, "      {\n");
-		fprintf(f, "        \"line\": %d,\n", line);
-		fprintf(f, "        \"cram_values\": [");
+		fprintf(f, "    {\n");
+		fprintf(f, "      \"line\": %d,\n", line);
+		fprintf(f, "      \"cram_values\": [");
 		for (int c = 0; c < 16; c++) {
 			if (c) fprintf(f, ", ");
 			fprintf(f, "\"0%03X\"", vdp->cram[line * 16 + c] & 0xFFF);
@@ -4658,14 +4657,14 @@ static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
 		fprintf(f, "],\n");
 		uint32_t cram_src;
 		if (vdp_dma_lookup_cram_source(vdp, line * 32, 32, &cram_src)) {
-			fprintf(f, "        \"dma_source\": \"0x%X\"\n", cram_src);
+			fprintf(f, "      \"dma_source\": \"0x%X\"\n", cram_src);
 		} else {
-			fprintf(f, "        \"dma_source\": null\n");
+			fprintf(f, "      \"dma_source\": null\n");
 		}
-		fprintf(f, "      }%s\n", line < 3 ? "," : "");
+		fprintf(f, "    }%s\n", line < 3 ? "," : "");
 	}
-	fprintf(f, "    ],\n");
-	fprintf(f, "    \"frames\": [\n");
+	fprintf(f, "  ],\n");
+	fprintf(f, "  \"frames\": [\n");
 	fflush(f);
 
 	// Allocate previous frame buffer
@@ -4694,8 +4693,7 @@ static uint8_t cmd_spriterecordstop(debug_root *root, parsed_command *cmd)
 	}
 
 	// Write JSON footer
-	fprintf(vdp->sprite_rec_file, "\n    ]\n");
-	fprintf(vdp->sprite_rec_file, "  }\n");
+	fprintf(vdp->sprite_rec_file, "\n  ]\n");
 	fprintf(vdp->sprite_rec_file, "}\n");
 	fclose(vdp->sprite_rec_file);
 
@@ -4724,7 +4722,7 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 
 	// Parse filename from raw args
 	static char filename_buf[512];
-	const char *filename = "spritecap.json";
+	const char *filename = "spritecap.sprec";
 	if (cmd->raw && cmd->raw[0]) {
 		char *cur = cmd->raw;
 		while (*cur && isspace(*cur)) cur++;
@@ -4740,8 +4738,6 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 		}
 	}
 
-	uint32_t rom_size = gen->header.info.rom_size;
-
 	cap_sprite sprites[MAX_SPRITES_FRAME];
 	int sprite_count = capture_sprites_to_array(vdp, sprites, MAX_SPRITES_FRAME);
 
@@ -4750,38 +4746,22 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 		return 1;
 	}
 
-	// Calculate bounding box for the collection
-	int16_t min_x = 32767, min_y = 32767, max_x = -32768, max_y = -32768;
-	for (int i = 0; i < sprite_count; i++) {
-		cap_sprite *s = &sprites[i];
-		if (s->x < min_x) min_x = s->x;
-		if (s->y < min_y) min_y = s->y;
-		int16_t right = s->x + s->width_tiles * 8;
-		int16_t bottom = s->y + s->height_tiles * 8;
-		if (right > max_x) max_x = right;
-		if (bottom > max_y) max_y = bottom;
-	}
-
 	FILE *f = fopen(filename, "w");
 	if (!f) {
 		fprintf(stderr, "Failed to open %s for writing\n", filename);
 		return 1;
 	}
 
+	// Write .sprec format: game_name, palettes[], frames[] at root level
 	fprintf(f, "{\n");
 	fprintf(f, "  \"game_name\": \"%s\",\n", gen->header.info.name ? gen->header.info.name : "Unknown");
-	fprintf(f, "  \"sprite_collections\": [\n");
-	fprintf(f, "    {\n");
-	fprintf(f, "      \"name\": \"capture_frame_%u\",\n", vdp->frame);
-	fprintf(f, "      \"bounding_box\": {\"x\": %d, \"y\": %d, \"width\": %d, \"height\": %d},\n",
-		min_x, min_y, max_x - min_x, max_y - min_y);
 
 	// Palettes — include all 4 CRAM lines
-	fprintf(f, "      \"palettes\": [\n");
+	fprintf(f, "  \"palettes\": [\n");
 	for (int line = 0; line < 4; line++) {
-		fprintf(f, "        {\n");
-		fprintf(f, "          \"line\": %d,\n", line);
-		fprintf(f, "          \"cram_values\": [");
+		fprintf(f, "    {\n");
+		fprintf(f, "      \"line\": %d,\n", line);
+		fprintf(f, "      \"cram_values\": [");
 		for (int c = 0; c < 16; c++) {
 			if (c) fprintf(f, ", ");
 			fprintf(f, "\"0%03X\"", vdp->cram[line * 16 + c] & 0xFFF);
@@ -4789,74 +4769,22 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 		fprintf(f, "],\n");
 		uint32_t cram_src;
 		if (vdp_dma_lookup_cram_source(vdp, line * 32, 32, &cram_src)) {
-			fprintf(f, "          \"dma_source\": \"0x%X\"\n", cram_src);
+			fprintf(f, "      \"dma_source\": \"0x%X\"\n", cram_src);
 		} else {
-			fprintf(f, "          \"dma_source\": null\n");
+			fprintf(f, "      \"dma_source\": null\n");
 		}
-		fprintf(f, "        }%s\n", line < 3 ? "," : "");
+		fprintf(f, "    }%s\n", line < 3 ? "," : "");
 	}
-	fprintf(f, "      ],\n");
+	fprintf(f, "  ],\n");
 
-	// Sprites array
-	fprintf(f, "      \"sprites\": [\n");
-	int embedded_count = 0;
-	for (int i = 0; i < sprite_count; i++) {
-		cap_sprite *s = &sprites[i];
-		int total_tiles = s->width_tiles * s->height_tiles;
-
-		fprintf(f, "        {\n");
-		fprintf(f, "          \"index\": %d,\n", s->index);
-		fprintf(f, "          \"x\": %d,\n", s->x);
-		fprintf(f, "          \"y\": %d,\n", s->y);
-		fprintf(f, "          \"width_tiles\": %d,\n", s->width_tiles);
-		fprintf(f, "          \"height_tiles\": %d,\n", s->height_tiles);
-		fprintf(f, "          \"palette_line\": %d,\n", s->pal);
-		fprintf(f, "          \"priority\": %s,\n", s->priority ? "true" : "false");
-		fprintf(f, "          \"h_flip\": %s,\n", s->h_flip ? "true" : "false");
-		fprintf(f, "          \"v_flip\": %s,\n", s->v_flip ? "true" : "false");
-		fprintf(f, "          \"pattern\": %d,\n", s->pattern);
-		fprintf(f, "          \"vram_addr\": \"0x%04X\",\n", s->vram_addr);
-
-		// Look up DMA source for the tile data
-		uint32_t dma_src;
-		if (vdp_dma_lookup_source(vdp, s->vram_addr, &dma_src) && dma_src < rom_size) {
-			fprintf(f, "          \"rom_offset\": \"0x%X\",\n", dma_src);
-			fprintf(f, "          \"source\": \"dma\"\n");
-		} else {
-			// Try brute-force ROM search with first tile
-			uint8_t *tile_data = &vdp->vdpmem[s->vram_addr];
-			uint32_t search_addr;
-			if (!is_tile_blank(tile_data) && vdp_find_tile_in_rom(tile_data, gen->cart, rom_size, &search_addr)) {
-				fprintf(f, "          \"rom_offset\": \"0x%X\",\n", search_addr);
-				fprintf(f, "          \"source\": \"search\"\n");
-			} else {
-				// Embed tile data
-				fprintf(f, "          \"rom_offset\": null,\n");
-				fprintf(f, "          \"source\": \"embedded\",\n");
-				fprintf(f, "          \"tile_data\": \"");
-				for (int t = 0; t < total_tiles; t++) {
-					// Genesis sprite tiles are in column-major order
-					uint16_t tile_vram = s->vram_addr + t * 32;
-					for (int b = 0; b < 32; b++) {
-						json_write_hex_byte(f, vdp->vdpmem[tile_vram + b]);
-					}
-				}
-				fprintf(f, "\"\n");
-				embedded_count++;
-			}
-		}
-
-		fprintf(f, "        }%s\n", i < sprite_count - 1 ? "," : "");
-	}
-	fprintf(f, "      ]\n");
-
-	fprintf(f, "    }\n");
-	fprintf(f, "  ]\n");
+	// Single frame
+	fprintf(f, "  \"frames\": [\n");
+	write_sprite_json_frame(f, vdp, gen, sprites, sprite_count, vdp->frame, 0);
+	fprintf(f, "\n  ]\n");
 	fprintf(f, "}\n");
 
 	fclose(f);
-	printf("Sprite collection written to %s (%d sprites, %d embedded, bounding box %dx%d)\n",
-		filename, sprite_count, embedded_count, max_x - min_x, max_y - min_y);
+	printf("Sprite capture written to %s (%d sprites)\n", filename, sprite_count);
 	return 1;
 }
 
