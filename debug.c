@@ -4626,9 +4626,15 @@ static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
 			char *start = cur;
 			while (*cur && !isspace(*cur)) cur++;
 			int len = cur - start;
-			if (len > 0 && len < (int)sizeof(filename_buf)) {
+			if (len > 0 && len < (int)sizeof(filename_buf) - 6) {
 				memcpy(filename_buf, start, len);
 				filename_buf[len] = '\0';
+				// Add .sprec extension if no extension present
+				char *dot = strrchr(filename_buf, '.');
+				char *slash = strrchr(filename_buf, '/');
+				if (!dot || (slash && dot < slash)) {
+					strcat(filename_buf, ".sprec");
+				}
 				filename = filename_buf;
 			}
 		}
@@ -4730,9 +4736,15 @@ static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 			char *start = cur;
 			while (*cur && !isspace(*cur)) cur++;
 			int len = cur - start;
-			if (len > 0 && len < (int)sizeof(filename_buf)) {
+			if (len > 0 && len < (int)sizeof(filename_buf) - 6) {
 				memcpy(filename_buf, start, len);
 				filename_buf[len] = '\0';
+				// Add .sprec extension if no extension present
+				char *dot = strrchr(filename_buf, '.');
+				char *slash = strrchr(filename_buf, '/');
+				if (!dot || (slash && dot < slash)) {
+					strcat(filename_buf, ".sprec");
+				}
 				filename = filename_buf;
 			}
 		}
