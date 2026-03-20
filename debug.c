@@ -4675,6 +4675,11 @@ static uint8_t cmd_spriterecord(debug_root *root, parsed_command *cmd)
 
 	// Allocate previous frame buffer
 	vdp->sprite_rec_prev = calloc(MAX_SPRITES_FRAME, sizeof(cap_sprite));
+	if (!vdp->sprite_rec_prev) {
+		fprintf(stderr, "Failed to allocate sprite recording buffer\n");
+		fclose(f);
+		return 1;
+	}
 	vdp->sprite_rec_prev_count = 0;
 	vdp->sprite_rec_file = f;
 	vdp->sprite_rec_active = 1;

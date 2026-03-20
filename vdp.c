@@ -176,8 +176,18 @@ uint32_t dma_history_config_size = DMA_HISTORY_DEFAULT;
 vdp_context *init_vdp_context_int(uint8_t region_pal, uint8_t has_max_vsram, uint8_t type)
 {
 	vdp_context *context = calloc(1, sizeof(vdp_context) + VRAM_SIZE);
+	if (!context) {
+		fprintf(stderr, "Failed to allocate VDP context\n");
+		return NULL;
+	}
 	context->dma_history_size = dma_history_config_size;
+	context->dma_history_idx = 0;
 	context->dma_history = calloc(context->dma_history_size, sizeof(dma_history_entry));
+	if (!context->dma_history) {
+		fprintf(stderr, "Failed to allocate DMA history buffer (%u entries)\n", context->dma_history_size);
+		context->dma_history_size = 0;
+	}
+	context->sprite_debug_count = 0;
 	context->sprite_draws = MAX_SPRITES_LINE;
 	context->fifo_write = 0;
 	context->fifo_read = -1;
@@ -1154,6 +1164,7 @@ static void vdp_record_dma(vdp_context *context)
 	if (context->regs[REG_DMASRC_H] & 0x80) return;
 	uint8_t cd_type = context->cd & 0xF;
 	if (cd_type != VRAM_WRITE && cd_type != CRAM_WRITE) return;
+	if (!context->dma_history || !context->dma_history_size) return;
 
 	dma_history_entry *e = &context->dma_history[context->dma_history_idx];
 	e->src_addr = ((uint32_t)(context->regs[REG_DMASRC_H] & 0x7F) << 17)
@@ -1168,6 +1179,7 @@ static void vdp_record_dma(vdp_context *context)
 
 int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *rom_addr_out)
 {
+	if (!context->dma_history || !context->dma_history_size) return 0;
 	for (uint32_t i = 0; i < context->dma_history_size; i++) {
 		int idx = (context->dma_history_idx - 1 - i + context->dma_history_size) % context->dma_history_size;
 		dma_history_entry *e = &context->dma_history[idx];
@@ -1183,6 +1195,7 @@ int vdp_dma_lookup_source(vdp_context *context, uint32_t vram_addr, uint32_t *ro
 
 int vdp_dma_lookup_cram_source(vdp_context *context, uint32_t cram_byte_addr, uint32_t cram_size, uint32_t *src_addr_out)
 {
+	if (!context->dma_history || !context->dma_history_size) return 0;
 	for (uint32_t i = 0; i < context->dma_history_size; i++) {
 		int idx = (context->dma_history_idx - 1 - i + context->dma_history_size) % context->dma_history_size;
 		dma_history_entry *e = &context->dma_history[idx];

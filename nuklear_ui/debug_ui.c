@@ -85,7 +85,9 @@ static void plane_debug_ui(void)
 				int sprite_x = x / 2 - 128;
 				int sprite_y = y / 2 - 128;
 				int hit = -1;
-				for (int s = vdp->sprite_debug_count - 1; s >= 0; s--) {
+				int safe_count = vdp->sprite_debug_count <= MAX_SPRITES_FRAME
+					? vdp->sprite_debug_count : MAX_SPRITES_FRAME;
+				for (int s = safe_count - 1; s >= 0; s--) {
 					sprite_debug_entry *sde = &vdp->sprite_debug_table[s];
 					if (sprite_x >= sde->x && sprite_x < sde->x + sde->width &&
 					    sprite_y >= sde->y && sprite_y < sde->y + sde->height) {
