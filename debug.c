@@ -4720,6 +4720,241 @@ static uint8_t cmd_spriterecordstop(debug_root *root, parsed_command *cmd)
 	return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Code trace: record branch/jump targets for Binary Ninja import
+// ---------------------------------------------------------------------------
+
+#define CODETRACE_MAX_ENTRIES 65536
+
+typedef struct {
+	uint32_t source;
+	uint32_t target;
+	uint8_t  type;   // 0=jsr, 1=jmp, 2=bsr, 3=bcc
+} codetrace_entry;
+
+static struct {
+	codetrace_entry *entries;
+	uint32_t        count;
+	uint32_t        capacity;
+	uint8_t         active;
+	char            filename[512];
+	// Hash set for dedup (target addresses only)
+	uint8_t         *seen;     // bitmap: seen[addr/8] & (1 << (addr%8))
+	uint32_t        seen_size; // bytes in seen array
+} codetrace_state = {0};
+
+static void codetrace_add(uint32_t source, uint32_t target, uint8_t type)
+{
+	if (!codetrace_state.active) return;
+	if (target == 0 || target >= codetrace_state.seen_size * 8) return;
+
+	// Check dedup bitmap
+	uint32_t byte_idx = target / 8;
+	uint8_t  bit_mask = 1 << (target % 8);
+	if (codetrace_state.seen[byte_idx] & bit_mask) return;
+	codetrace_state.seen[byte_idx] |= bit_mask;
+
+	if (codetrace_state.count >= codetrace_state.capacity) return;
+
+	codetrace_entry *e = &codetrace_state.entries[codetrace_state.count++];
+	e->source = source;
+	e->target = target;
+	e->type   = type;
+}
+
+static void codetrace_check_instruction(m68k_context *context, uint32_t address)
+{
+	if (!codetrace_state.active) return;
+
+	m68kinst inst;
+	m68k_decode(m68k_instruction_fetch, context, &inst, address);
+
+	uint32_t target = 0;
+	uint8_t type = 0;
+
+	switch (inst.op)
+	{
+	case M68K_JSR:
+		type = 0;
+		if (inst.src.addr_mode == MODE_ABSOLUTE || inst.src.addr_mode == MODE_ABSOLUTE_SHORT)
+			target = inst.src.params.immed;
+		else if (inst.src.addr_mode == MODE_PC_DISPLACE)
+			target = inst.address + 2 + inst.src.params.regs.displacement;
+		break;
+	case M68K_JMP:
+		type = 1;
+		if (inst.src.addr_mode == MODE_ABSOLUTE || inst.src.addr_mode == MODE_ABSOLUTE_SHORT)
+			target = inst.src.params.immed;
+		else if (inst.src.addr_mode == MODE_PC_DISPLACE)
+			target = inst.address + 2 + inst.src.params.regs.displacement;
+		break;
+	case M68K_BSR:
+		type = 2;
+		target = inst.address + 2 + inst.src.params.immed;
+		break;
+	case M68K_BCC:
+		type = 3;
+		target = inst.address + 2 + inst.src.params.immed;
+		break;
+	default:
+		return;
+	}
+
+	if (target)
+		codetrace_add(inst.address, target, type);
+}
+
+static void codetrace_frame_hook(vdp_context *vdp)
+{
+	// Called each frame — decode the current PC's instruction
+	genesis_context *gen = (genesis_context *)vdp->system;
+	m68k_context *m68k = gen->m68k;
+
+	// We can't trace every instruction from a frame hook.
+	// Instead, we'll rely on the address_log mechanism.
+	// This hook just keeps the recording active.
+	(void)m68k;
+}
+
+static void codetrace_write_file(genesis_context *gen)
+{
+	if (!codetrace_state.count) {
+		printf("Code trace: no entries recorded.\n");
+		return;
+	}
+
+	FILE *f = fopen(codetrace_state.filename, "w");
+	if (!f) {
+		fprintf(stderr, "Failed to open %s for writing\n", codetrace_state.filename);
+		return;
+	}
+
+	static const char *type_names[] = {"jsr", "jmp", "bsr", "bcc"};
+
+	fprintf(f, "{\n");
+	fprintf(f, "  \"game_name\": \"%s\",\n",
+		gen->header.info.name ? gen->header.info.name : "Unknown");
+	fprintf(f, "  \"code_targets\": [\n");
+
+	for (uint32_t i = 0; i < codetrace_state.count; i++) {
+		codetrace_entry *e = &codetrace_state.entries[i];
+		fprintf(f, "    {\"source\": \"0x%06X\", \"target\": \"0x%06X\", \"type\": \"%s\"}%s\n",
+			e->source, e->target,
+			e->type < 4 ? type_names[e->type] : "unknown",
+			i < codetrace_state.count - 1 ? "," : "");
+	}
+
+	fprintf(f, "  ]\n");
+	fprintf(f, "}\n");
+	fclose(f);
+
+	printf("Code trace: wrote %u entries to %s\n",
+		codetrace_state.count, codetrace_state.filename);
+}
+
+static uint8_t cmd_codetrace(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+
+	if (codetrace_state.active) {
+		fprintf(stderr, "Code trace already active. Use codetracestop first.\n");
+		return 1;
+	}
+
+	// Parse filename
+	const char *filename = "codetrace.json";
+	static char filename_buf[512];
+	if (cmd->raw && cmd->raw[0]) {
+		char *cur = cmd->raw;
+		while (*cur && isspace(*cur)) cur++;
+		if (*cur) {
+			char *start = cur;
+			while (*cur && !isspace(*cur)) cur++;
+			int len = cur - start;
+			if (len > 0 && len < (int)sizeof(filename_buf) - 6) {
+				memcpy(filename_buf, start, len);
+				filename_buf[len] = '\0';
+				char *dot = strrchr(filename_buf, '.');
+				char *slash = strrchr(filename_buf, '/');
+				if (!dot || (slash && dot < slash))
+					strcat(filename_buf, ".json");
+				filename = filename_buf;
+			}
+		}
+	}
+	strncpy(codetrace_state.filename, filename, sizeof(codetrace_state.filename) - 1);
+
+	// Allocate entry array and dedup bitmap
+	uint32_t rom_size = gen->header.info.rom_size;
+	if (rom_size == 0) rom_size = 0x400000;
+
+	codetrace_state.capacity = CODETRACE_MAX_ENTRIES;
+	codetrace_state.entries = calloc(codetrace_state.capacity, sizeof(codetrace_entry));
+	codetrace_state.seen_size = (rom_size + 7) / 8;
+	codetrace_state.seen = calloc(codetrace_state.seen_size, 1);
+	codetrace_state.count = 0;
+
+	if (!codetrace_state.entries || !codetrace_state.seen) {
+		fprintf(stderr, "Failed to allocate code trace buffers\n");
+		free(codetrace_state.entries);
+		free(codetrace_state.seen);
+		codetrace_state.entries = NULL;
+		codetrace_state.seen = NULL;
+		return 1;
+	}
+
+	codetrace_state.active = 1;
+
+	// Enable the address log hook to call our checker
+	// We piggyback on the address_log mechanism
+	if (!m68k->opts->address_log) {
+		m68k->opts->address_log = tmpfile();
+	}
+
+	printf("Code trace started → %s (resume emulation, then use codetracestop)\n", filename);
+	printf("Note: traces branch/jump targets from executed code paths.\n");
+	return 0; // resume execution
+}
+
+static uint8_t cmd_codetracestop(debug_root *root, parsed_command *cmd)
+{
+	m68k_context *m68k = root->cpu_context;
+	genesis_context *gen = m68k->system;
+
+	(void)cmd;
+
+	if (!codetrace_state.active) {
+		fprintf(stderr, "No code trace in progress.\n");
+		return 1;
+	}
+
+	// Before writing, do a final scan of the address log
+	// The address log has been recording every executed PC
+	if (m68k->opts->address_log) {
+		rewind(m68k->opts->address_log);
+		char line[64];
+		while (fgets(line, sizeof(line), m68k->opts->address_log)) {
+			uint32_t addr = strtoul(line, NULL, 16);
+			if (addr)
+				codetrace_check_instruction(m68k, addr);
+		}
+		fclose(m68k->opts->address_log);
+		m68k->opts->address_log = NULL;
+	}
+
+	codetrace_write_file(gen);
+
+	free(codetrace_state.entries);
+	free(codetrace_state.seen);
+	codetrace_state.entries = NULL;
+	codetrace_state.seen = NULL;
+	codetrace_state.active = 0;
+	codetrace_state.count = 0;
+
+	return 1;
+}
+
 static uint8_t cmd_spritecap(debug_root *root, parsed_command *cmd)
 {
 	m68k_context *m68k = root->cpu_context;
@@ -5115,6 +5350,27 @@ command_def genesis_commands[] = {
 		.usage = "spriterecordstop",
 		.desc = "Stop sprite recording and close the JSON file",
 		.impl = cmd_spriterecordstop,
+		.min_args = 0,
+		.max_args = 0
+	},
+	{
+		.names = (const char *[]){
+			"codetrace", "ct", NULL
+		},
+		.usage = "codetrace [FILE]",
+		.desc = "Start recording branch/jump targets to a file for Binary Ninja import",
+		.impl = cmd_codetrace,
+		.min_args = 0,
+		.max_args = 1,
+		.raw_args = 1
+	},
+	{
+		.names = (const char *[]){
+			"codetracestop", "ctstop", NULL
+		},
+		.usage = "codetracestop",
+		.desc = "Stop code trace recording and write the output file",
+		.impl = cmd_codetracestop,
 		.min_args = 0,
 		.max_args = 0
 	}
